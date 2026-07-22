@@ -1,0 +1,60 @@
+# Local repository history retained while consolidating the project
+.repo-backups/
+
+# Downloaded model weights and private biometric enrollment data
+face_emotion_app/models/
+face_emotion_app/data/
+models/
+data/
+captures/
+recordings/
+*.onnx
+*.tflite
+*.pt
+*.pth
+*.bin
+*.wav
+*.webm
+*.mp3
+
+# Python environments and generated files
+**/.venv*/
+**/venv/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Secrets and local configuration
+.env
+.env.*
+*.env
+.secrets/
+secrets/
+credentials/
+credentials.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+*.jks
+id_rsa*
+id_ed25519*
+
+# Local databases and enrollment exports
+*.sqlite
+*.sqlite3
+*.db
+enrollments.json
+emotions.json
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime output
+*.log
+*.pid
+*.tmp
+*.bak

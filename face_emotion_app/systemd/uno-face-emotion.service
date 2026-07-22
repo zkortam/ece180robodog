@@ -1,0 +1,16 @@
+[Unit]
+Description=UNO Q local face and emotion recognition
+After=multi-user.target
+
+[Service]
+Type=simple
+User=arduino
+WorkingDirectory=/home/arduino/app
+ExecStart=/home/arduino/app/scripts/run_board_face.sh
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

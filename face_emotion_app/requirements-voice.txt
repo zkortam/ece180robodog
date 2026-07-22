@@ -1,0 +1,14 @@
+# Voice agent deps (in addition to the base app: numpy, opencv-python, flask)
+openai>=1.40            # Cerebras is OpenAI-compatible; point base_url at api.cerebras.ai/v1
+
+# --- STT: pick per platform ---
+faster-whisper>=1.0     # Mac dev default (tiny.en). Decodes webm/wav via PyAV.
+# useful-moonshine-onnx  # BOARD default (Moonshine v2 tiny, streaming). Install on the UNO Q.
+
+# --- TTS ---
+# macOS dev uses the built-in `say` (no pip). BOARD uses Piper (install via install_voice.sh)
+# espeak-ng is the always-works fallback (apt install espeak-ng)
+
+# --- optional integrations ---
+# mcp                    # Tier-1 external MCP servers (calendar, home assistant, ...)
+# fastmcp                # Tier-2: expose vision as its own MCP server

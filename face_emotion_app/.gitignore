@@ -1,0 +1,20 @@
+# Large model files — fetched by scripts/install_voice.sh + scripts/download_models.sh
+models/
+
+# Local biometric enrollment data (faces / emotion prototypes) — never publish
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv*/
+venv/
+*.egg-info/
+
+# Secrets / environment
+*.env
+.env
+.env.*
+
+# OS / editor
+.DS_Store
