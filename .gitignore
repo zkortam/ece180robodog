@@ -58,3 +58,4 @@ emotions.json
 *.pid
 *.tmp
 *.bak
+.vercel

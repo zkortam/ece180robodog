@@ -193,10 +193,15 @@ class TTS:
             return self._piper_cli(text)
         import io as _io
         import wave as _wave
+        from piper import SynthesisConfig
+        # length_scale under 1 shortens the audio, which cuts BOTH synthesis time
+        # and playback time. The CLI path always applied it; the module path must
+        # too, or the board speaks slower than the tuned default.
+        syn = SynthesisConfig(length_scale=config.PIPER_LENGTH_SCALE)
         with self._piper_lock:
             buf = _io.BytesIO()
             with _wave.open(buf, "wb") as w:
-                voice.synthesize_wav(clean, w)
+                voice.synthesize_wav(clean, w, syn_config=syn)
             return buf.getvalue()
 
     def _piper_voice_engine(self):

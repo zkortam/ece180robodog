@@ -189,7 +189,7 @@ let convState='idle',pcmNode=null,silentGain=null,pcmChunks=[],pcmPreroll=[],seg
 let streamSources=new Set(),streamDone=false,playbackEnd=0,streamAbort=null;
 let voicedMs=0,silenceMs=0,speechMs=0,hasSpeech=false,pending=null;
 let visionOpen=false,visionKind='',visionBusy=false,turnUsedCamera=false;
-let outLevel=0,speakStart=0;   // live playback level + when speaking began, for barge-in
+let outLevel=0,speakStart=0,frameTick=0;   // live playback level + when speaking began, for barge-in
 const API=__API_BASE__;   // '' when the board serves the page; absolute when Vercel does
 const ENDPOINT_MS=__ENDPOINT_MS__,MIN_SPEECH_MS=240,MAX_UTTER_MS=15000,LISTEN_RESET_MS=8000;
 // Barge-in must survive the speaker-to-mic path. Without a grace window, a hold
@@ -493,6 +493,10 @@ setInterval(()=>{
   // frame stays fresh enough for the current turn. Active enrollment is the one
   // exception: it needs fresh frames to collect the requested samples.
   if(!cam.videoWidth||frameBusy||(convState==='thinking'&&!looking)||convState==='speaking')return;
+  // The camera panel is closed most of the time now, and every uploaded frame
+  // costs the board a face-detection pass. Halve the rate when nothing is
+  // watching: identity stays fresh enough, and the cores go to STT and TTS.
+  if(!visionOpen&&!looking&&(frameTick++&1))return;
   // Claim the slot before toBlob, not inside its callback: encoding is async, so
   // the next tick would otherwise fire a second upload while this one encodes.
   frameBusy=true;
