@@ -152,6 +152,21 @@ body[data-vision="true"] .vision-lens{opacity:1;visibility:visible;transform:tra
  transition:color .3s var(--ease),background .3s var(--ease),border-color .3s var(--ease)}
 .enroll-link:hover{color:var(--text);background:var(--glass-2);border-color:var(--glass-border-2)}
 body[data-vision="true"] .enroll-link{opacity:0;pointer-events:none}
+.link{position:fixed;top:clamp(16px,2.6vh,26px);right:clamp(16px,2.6vw,26px);z-index:9;
+ display:inline-flex;align-items:center;gap:8px;padding:7px 13px;border-radius:var(--r-full);
+ background:var(--glass);border:1px solid var(--glass-border);
+ backdrop-filter:blur(var(--blur-glass)) saturate(1.3);-webkit-backdrop-filter:blur(var(--blur-glass)) saturate(1.3);
+ color:var(--text-3);font-size:12px;font-weight:500;text-decoration:none;cursor:pointer;
+ transition:color .35s var(--ease),border-color .35s var(--ease),background .35s var(--ease)}
+.link:hover{color:var(--text);border-color:var(--glass-border-2);background:var(--glass-2)}
+/* Board connection. A steady dot, never a pulsing one: it reports state, it does not nag. */
+#board{left:clamp(16px,2.6vw,26px);right:auto}
+#boardDot{width:7px;height:7px;border-radius:50%;background:var(--text-4);
+ transition:background .4s var(--ease)}
+body[data-board="connected"] #boardDot{background:#6fcf97}
+body[data-board="connecting"] #boardDot{background:var(--warm)}
+body[data-board="offline"] #boardDot{background:var(--danger)}
+body[data-board="offline"] #board{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 35%,transparent)}
 @media (max-height:620px){
  .presence{width:min(38vw,38vh);height:min(38vw,38vh)}
  .vision-lens{width:min(64vw,420px)}
@@ -175,6 +190,7 @@ body[data-vision="true"] .enroll-link{opacity:0;pointer-events:none}
    <ellipse id="mouth" cx="100" cy="130" rx="27" ry="3" style="display:none"/>
   </svg>
  </div>
+ <button id="board" class="link" type="button" title="Check the board connection"><span id="boardDot"></span><span id="boardText">Connecting</span></button>
  <div class="readout" aria-live="polite">
   <div id="mode"><span id="modeText">Standby</span></div>
   <div id="status">Click the face to begin</div>
@@ -346,7 +362,7 @@ function vadLoop(){
  setVoiceLevel(visualLevel);
  if(!calibrated){calibVals.push(e);if(calibVals.length>=25){const s=[...calibVals].sort((a,b)=>a-b);noiseFloor=Math.max(0.005,s[Math.floor(s.length*0.25)]);calibrated=true}}
  else if(convState==='listening'&&!hasSpeech&&e<noiseFloor*2.2){noiseFloor=Math.max(0.004,noiseFloor*0.98+e*0.02)}
- const onset=Math.max(0.018,noiseFloor*3.2),keep=Math.max(0.010,noiseFloor*1.7),barge=Math.max(0.06,noiseFloor*6.5);
+ const onset=Math.max(0.032,noiseFloor*4.2),keep=Math.max(0.010,noiseFloor*1.7),barge=Math.max(0.06,noiseFloor*6.5);
  if(convState==='listening'||convState==='recording'){
    if(e>peakE)peakE=e;
    if(e>onset){voicedMs+=dt;silenceMs=0;
@@ -395,7 +411,11 @@ function downsamplePcm(chunks,inputRate,targetRate=16000){
  return {chunks:[out],sampleRate:targetRate};
 }
 async function sendUtterance(){
- const chunks=pcmChunks;pcmChunks=[];pcmPreroll=[];
+ let chunks=pcmChunks;pcmChunks=[];pcmPreroll=[];
+ // ENDPOINT_MS of silence is what proved the turn ended; only a short tail is
+ // needed to avoid clipping the last consonant. Transcribing the rest is waste.
+ const blockMs=2048/audioCtx.sampleRate*1000,drop=Math.floor((ENDPOINT_MS-120)/blockMs);
+ if(drop>0&&chunks.length>drop+4)chunks=chunks.slice(0,chunks.length-drop);
  if(!chunks.length){hideVision();beginListen();return}
  const pcm=downsamplePcm(chunks,audioCtx.sampleRate);
  const blob=pcmWavBlob(pcm.chunks,pcm.sampleRate);
@@ -543,6 +563,39 @@ function togglePause(){handsFree=!handsFree;if(handsFree){beginListen()}else{if(
 faceEl.addEventListener('click',e=>{e.stopPropagation();if(!started)startAll();else togglePause()});
 document.body.addEventListener('click',()=>{if(!started)startAll()});
 document.getElementById('enrollLink').href=ENROLL_URL;
+// ---------- board connection ----------
+// The page is served from Vercel but the agent lives on the Arduino behind
+// `adb forward`. Unplugging the cable kills the tunnel silently, so poll a cheap
+// health route and say plainly which of the three states we are in.
+const boardEl=document.getElementById('board'),boardDot=document.getElementById('boardDot'),
+      boardText=document.getElementById('boardText');
+let boardState='',boardChecking=false,boardFails=0;
+function setBoard(state,label){
+ if(boardState===state&&!label)return;
+ boardState=state;document.body.dataset.board=state;
+ boardText.textContent=label||({connected:'Board connected',connecting:'Connecting',offline:'Board disconnected'}[state]||state);
+}
+async function checkBoard(manual){
+ if(boardChecking)return boardState==='connected';
+ boardChecking=true;
+ if(manual)setBoard('connecting','Searching');
+ try{
+  const ctl=new AbortController(),t=setTimeout(()=>ctl.abort(),2500);
+  const r=await fetch(API+'/api/health',{signal:ctl.signal,cache:'no-store'});
+  clearTimeout(t);
+  if(!r.ok)throw new Error('bad status');
+  boardFails=0;setBoard('connected');return true;
+ }catch(e){
+  // One missed probe during a busy turn is normal; only call it offline once a
+  // couple in a row fail, so the indicator does not flicker mid-conversation.
+  boardFails++;
+  if(boardFails>=2)setBoard('offline');else if(boardState!=='connected')setBoard('connecting');
+  return false;
+ }finally{boardChecking=false}
+}
+boardEl.addEventListener('click',e=>{e.stopPropagation();checkBoard(true)});
+checkBoard();
+setInterval(()=>checkBoard(),3000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&started&&(convState==='listening'||convState==='recording'))restartSeg()});
 </script></body></html>
 """
@@ -719,6 +772,16 @@ def create_app(agent, vision_service):
     @app.get("/api/vision/scene")
     def scene():
         return jsonify(vision_service.describe_scene())
+
+    @app.get("/api/health")
+    def health():
+        """Cheap liveness probe for the hosted UI's connection indicator.
+
+        Deliberately touches nothing expensive: the page polls this every couple of
+        seconds to tell 'board unplugged' apart from 'board busy with a turn'.
+        """
+        return jsonify({"ok": True, "stt": config.STT_BACKEND, "tts": config.TTS_BACKEND,
+                        "model": config.CEREBRAS_MODEL})
 
     @app.get("/api/vision/enroll_status")
     def enroll_status():
