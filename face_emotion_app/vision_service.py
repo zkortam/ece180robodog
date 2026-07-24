@@ -197,8 +197,10 @@ class VisionService:
         """Feed one externally-captured BGR frame (browser camera path)."""
         if not self.running:
             return {"ok": False, "reason": "not watching"}
-        self.step(frame)
-        return {"ok": True, "num_faces": len(self.latest)}
+        observations = self.step(frame)
+        # Count what THIS frame produced. Reading self.latest afterwards races with
+        # a concurrently submitted frame and can report the other one's face count.
+        return {"ok": True, "num_faces": len(observations)}
 
     def stop(self):
         with self.lock:
@@ -217,29 +219,73 @@ class VisionService:
         return {"camera": self.camera, "fps": self.fps,
                 "emotion_every": self.emotion_every, "threshold": self.threshold}
 
-    def _loop(self):
+    # A USB camera that is unplugged keeps returning (False, None) forever rather
+    # than raising. Without a ceiling the loop spun at fps producing nothing while
+    # `running` stayed True, so the board's camera watcher never re-discovered the
+    # device: one accidental unplug blinded the robot until someone restarted it.
+    # Measured in seconds, not frames, so the behavior does not change with fps.
+    DEAD_FEED_SECONDS = 3.0
+    REOPEN_ATTEMPTS = 2
+
+    def _open_camera(self):
         try:
-            cap = fe.open_camera(self.camera, self.width, self.height)
-        except SystemExit as e:
+            return fe.open_camera(self.camera, self.width, self.height)
+        except Exception as e:                        # SystemExit included
             print(f"[vision] camera unavailable: {e}", file=sys.stderr)
+            return None
+
+    def _loop(self):
+        cap = self._open_camera()
+        if cap is None:
             with self.lock:
                 self.running = False
             return
         period = 1.0 / max(1, self.fps)
+        last_good = time.time()
+        healthy_since = last_good
+        reopens = 0
         try:
             while not self._stop.is_set():
                 t0 = time.time()
                 ok, frame = cap.read()
                 if ok and frame is not None:
+                    if t0 - last_good >= self.DEAD_FEED_SECONDS:
+                        healthy_since = t0            # first frame back after a gap
+                    last_good = t0
+                    # Forgive the retry budget only once the feed has been healthy
+                    # for a while. Clearing it on the first frame lets a camera that
+                    # yields one frame per open reopen forever without ever
+                    # escalating -- which is exactly how a dying USB camera behaves.
+                    if t0 - healthy_since >= self.DEAD_FEED_SECONDS:
+                        reopens = 0
                     try:
                         self.step(frame)
                     except Exception as e:            # one bad frame must never kill perception
                         print(f"[vision] frame error: {e}", file=sys.stderr)
+                elif t0 - last_good >= self.DEAD_FEED_SECONDS:
+                    cap.release()
+                    reopens += 1
+                    if reopens > self.REOPEN_ATTEMPTS:
+                        print(f"[vision] camera {self.camera} stopped delivering frames; "
+                              "releasing it so it can be re-discovered", file=sys.stderr)
+                        with self.lock:
+                            self.running = False
+                        return
+                    print(f"[vision] camera {self.camera} went quiet; reopening "
+                          f"({reopens}/{self.REOPEN_ATTEMPTS})", file=sys.stderr)
+                    self._stop.wait(1.0)
+                    cap = self._open_camera()
+                    if cap is None:
+                        with self.lock:
+                            self.running = False
+                        return
+                    last_good = healthy_since = time.time()
                 dt = time.time() - t0
                 if dt < period:
                     self._stop.wait(period - dt)
         finally:
-            cap.release()
+            if cap is not None:
+                cap.release()
 
     # ---- the per-frame perception step (also used directly by tests) ----
     def step(self, frame):
@@ -456,7 +502,10 @@ class VisionService:
         prob_vec = self.emotion.probabilities(frame, face)
         if prob_vec is None:
             return track["last_emotion"]
-        probs = {lab: round(float(p), 4) for lab, p in zip(fe.DEFAULT_LABELS, prob_vec)}
+        # zip() would silently drop classes if a swapped-in model emitted more than
+        # the seven labels we know. Name the extras rather than hide them.
+        probs = {(fe.DEFAULT_LABELS[i] if i < len(fe.DEFAULT_LABELS) else f"class_{i}"):
+                 round(float(p), 4) for i, p in enumerate(prob_vec)}
         protos = self.emotion_db.get(name) if name != "unknown" else None
         if protos:
             lbl, sc = fe.classify_personal(protos, prob_vec)

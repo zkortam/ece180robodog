@@ -91,23 +91,19 @@ def enrollment_guidance(frame, face, required_pose="center"):
     right_eye = np.asarray(face[4:6], dtype=np.float32)
     left_eye = np.asarray(face[6:8], dtype=np.float32)
     nose = np.asarray(face[8:10], dtype=np.float32)
-    mouth_right = np.asarray(face[10:12], dtype=np.float32)
-    mouth_left = np.asarray(face[12:14], dtype=np.float32)
     eye_mid = (right_eye + left_eye) / 2.0
-    mouth_mid = (mouth_right + mouth_left) / 2.0
     eye_span = max(float(np.linalg.norm(left_eye - right_eye)), 1.0)
-    mouth_gap = max(float(mouth_mid[1] - eye_mid[1]), 1.0)
     yaw = float((nose[0] - eye_mid[0]) / eye_span)
-    pitch = float((nose[1] - eye_mid[1]) / mouth_gap)
 
     # The preview is mirrored, so screen-left corresponds to positive raw-image yaw.
     if required_pose == "left" and yaw < 0.08:
         return False, "Turn left  ←"
     if required_pose == "right" and yaw > -0.08:
         return False, "Turn right  →"
-    # Five-point landmarks do not provide a stable pitch estimate across faces.
-    # Keep the up/down prompt for useful variety, but gate those samples on good
-    # framing instead of trapping the user behind an unreliable chin-angle test.
+    # Five-point landmarks do not provide a stable pitch estimate across faces, so
+    # there is deliberately no up/down test here. Keep the up/down prompt for useful
+    # variety, but gate those samples on good framing instead of trapping the user
+    # behind an unreliable chin-angle check.
     if required_pose == "center" and abs(yaw) > 0.15:
         return False, "Look straight at the camera"
     return True, "Hold that pose"
@@ -594,6 +590,9 @@ def command_recognize(args):
     frame_count = 0
     last_emotion = ("none", 0.0)
     last_print = 0.0
+    # 0 would mean "never", but it reaches a modulo: guard it here rather than
+    # dying with a ZeroDivisionError on the first frame.
+    emotion_every = max(1, args.emotion_every)
     db_mtime = db_path.stat().st_mtime_ns if db_path.exists() else 0
     emotion_db_mtime = emotion_db_path.stat().st_mtime_ns if emotion_db_path.exists() else 0
     try:
@@ -620,7 +619,7 @@ def command_recognize(args):
                 embedding, aligned = face_embedding(recognizer, frame, face)
                 if embedding is not None:
                     name, score = best_match(db, embedding, args.threshold)
-                    if emotion is not None and frame_count % args.emotion_every == 0:
+                    if emotion is not None and frame_count % emotion_every == 0:
                         probs = emotion.probabilities(frame, face)
                         if probs is not None:
                             protos = emotion_db.get(name) if name != "unknown" else None

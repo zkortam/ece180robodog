@@ -1,6 +1,10 @@
-"""Tier-0 local perception tools: the 8 read-only functions the LLM may call,
-each bound to a VisionService instance. This module is the single source of truth
-for the vision tool schemas (also reused by vision_mcp_server.py, DRY)."""
+"""Tier-0 local perception tools: the functions the LLM may call, each bound to a
+VisionService instance. This module is the single source of truth for the vision
+tool schemas (also reused by vision_mcp_server.py, DRY).
+
+Eight are read-only or camera on/off. Two -- enroll_face and train_emotion -- WRITE
+biometric data to the local databases; tool_bus.py registers exactly those two as
+RISK_WRITE, and vision_mcp_server.py deliberately does not expose them at all."""
 
 
 def _schema(name, description, properties=None, required=None):
@@ -11,7 +15,8 @@ def _schema(name, description, properties=None, required=None):
                        "required": required or [], "additionalProperties": False}}}
 
 
-# OpenAI-shaped tool definitions Cerebras sees. Grounded in VisionService (§5 of the arch doc).
+# OpenAI-shaped tool definitions Cerebras sees. Grounded in VisionService (§5 of the
+# arch doc). Order matters only for readability; the last two are the writers.
 VISION_TOOL_SCHEMAS = [
     _schema("who_is_in_view",
             "Who is in front of the camera right now: enrolled names + how many unknown faces. Cheap, latest frame.",

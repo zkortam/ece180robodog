@@ -14,9 +14,9 @@ import re
 import subprocess
 import tempfile
 import threading
-import time
 import wave
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 
@@ -41,6 +41,7 @@ class BoardAudioLoop:
     MIN_SPEECH_SECONDS = 0.28
     ENDPOINT_SECONDS = 0.30
     MAX_UTTERANCE_SECONDS = 12.0
+    CONFIG_FAULT_BACKOFF = 30.0
 
     def __init__(self, agent):
         self.agent = agent
@@ -69,21 +70,38 @@ class BoardAudioLoop:
         return bool(self.capture_device and self.playback_device)
 
     def _run(self):
-        announced = False
+        waiting = False
+        ready_for = None
         while not self._stop.is_set():
             if not self._discover():
-                if not announced:
+                if not waiting:
                     print("[board-audio] waiting for USB microphone and speaker")
-                    announced = True
+                    waiting, ready_for = True, None
                 self._stop.wait(2)
                 continue
-            if announced:
-                print(f"[board-audio] ready: mic={self.capture_device} speaker={self.playback_device}")
-                announced = False
+            waiting = False
+            # Announce the devices the first time and after any change, so the log
+            # always shows what the board is actually listening and speaking on.
+            devices = (self.capture_device, self.playback_device)
+            if devices != ready_for:
+                print(f"[board-audio] ready: mic={devices[0]} speaker={devices[1]}")
+                ready_for = devices
             try:
                 self._listen_once()
+            except KeyboardInterrupt:
+                raise
+            # SystemExit is a BaseException, and the agent raises it for CONFIG
+            # faults (rejected key, exhausted token budget). It used to unwind
+            # straight out of this thread: the board went permanently deaf with
+            # nothing in the log to say why. Such a fault fails identically every
+            # turn, so report it and back off instead of burning a turn per second.
+            except SystemExit as exc:
+                print(f"[board-audio] cannot answer: {exc}\n"
+                      f"[board-audio] retrying in {self.CONFIG_FAULT_BACKOFF:.0f}s "
+                      "-- fix the configuration and it resumes on its own")
+                self._stop.wait(self.CONFIG_FAULT_BACKOFF)
             except Exception as exc:
-                print(f"[board-audio] capture error: {type(exc).__name__}: {exc}")
+                print(f"[board-audio] {type(exc).__name__}: {exc}")
                 self._stop.wait(1)
 
     def _listen_once(self):
@@ -140,4 +158,5 @@ class BoardAudioLoop:
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                timeout=60, check=False)
         finally:
-            os.unlink(path)
+            # missing_ok: cleanup must never mask the real error from the turn.
+            Path(path).unlink(missing_ok=True)

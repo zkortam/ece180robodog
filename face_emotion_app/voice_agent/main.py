@@ -33,9 +33,17 @@ def main():
     ap.add_argument("--board-audio", action="store_true",
                     help="use directly attached USB microphone and speaker; auto-discovers camera")
     ap.add_argument("--owner", default=None, help="enrolled name allowed to trigger sensitive actions")
-    ap.add_argument("--stt", default=config.STT_BACKEND)
-    ap.add_argument("--tts", default=config.TTS_BACKEND)
+    ap.add_argument("--stt", default=config.STT_BACKEND, choices=config.STT_BACKENDS)
+    ap.add_argument("--tts", default=config.TTS_BACKEND, choices=config.TTS_BACKENDS)
     args = ap.parse_args()
+    # argparse only checks `choices` for values passed on the command line, so a
+    # typo in VOICE_STT/VOICE_TTS would slip through and fail much later -- as a
+    # 503 on the first spoken turn, long after startup looked healthy.
+    for flag, value, allowed, env in (("--stt", args.stt, config.STT_BACKENDS, "VOICE_STT"),
+                                      ("--tts", args.tts, config.TTS_BACKENDS, "VOICE_TTS")):
+        if value not in allowed:
+            raise SystemExit(f"unknown {flag} backend {value!r} (from {env} or {flag}). "
+                             f"Choose one of: {', '.join(allowed)}")
 
     vs = VisionService(camera=args.camera, fps=args.fps,
                        width=config.VISION_WIDTH, height=config.VISION_HEIGHT,
@@ -43,39 +51,62 @@ def main():
     if args.board_audio:
         # A board may boot before a USB camera enumerates.  The watcher starts
         # perception as soon as one becomes usable and retries after a disconnect.
-        def camera_watch():
-            import cv2
+        def capture_indexes():
+            """/dev/video* nodes that can actually be a camera, lowest index first.
+
+            Qualcomm's encoder/decoder nodes are /dev/video* too, so prefer what
+            v4l2-ctl reports. It is not installed everywhere, and a missing binary
+            used to raise straight out of the watcher thread -- leaving the board
+            permanently blind with nothing in the log. Fall back to probing the
+            nodes directly instead.
+            """
             from glob import glob
             import subprocess
+            found = []
+            for path in sorted(glob("/dev/video*")):
+                suffix = path.rsplit("video", 1)[1]
+                if not suffix.isdigit():
+                    continue
+                try:
+                    info = subprocess.run(["v4l2-ctl", "-D", "-d", path],
+                                          capture_output=True, text=True,
+                                          timeout=2, check=False).stdout
+                except (OSError, subprocess.SubprocessError):
+                    info = None                 # no v4l2-ctl: let the open() below decide
+                if info is None or "Video Capture" in info:
+                    found.append(int(suffix))
+            return sorted(found)
+
+        # A board may boot before a USB camera enumerates.  The watcher starts
+        # perception as soon as one becomes usable and retries after a disconnect.
+        def camera_watch():
+            import cv2
             if hasattr(cv2, "setLogLevel"):
                 cv2.setLogLevel(0)
+            complained = False
             while True:
-                with vs.lock:
-                    running = vs.running
-                if not running:
-                    # Only test nodes Linux actually created.  Probing arbitrary
-                    # indexes every two seconds wastes CPU and floods the journal.
-                    indexes = []
-                    for path in glob("/dev/video*"):
-                        suffix = path.rsplit("video", 1)[1]
-                        if not suffix.isdigit():
-                            continue
-                        info = subprocess.run(["v4l2-ctl", "-D", "-d", path],
-                                              capture_output=True, text=True,
-                                              timeout=2, check=False).stdout
-                        # Qualcomm's encoder/decoder nodes are /dev/video* too,
-                        # but only a node advertising Video Capture can be a camera.
-                        if "Video Capture" in info:
-                            indexes.append(int(suffix))
-                    indexes.sort()
-                    for index in indexes:
-                        cap = cv2.VideoCapture(index)
-                        ok, _ = cap.read() if cap.isOpened() else (False, None)
-                        cap.release()
-                        if ok:
-                            print(f"[vision] USB camera found at index {index}")
-                            vs.start(camera=index)
-                            break
+                try:
+                    with vs.lock:
+                        running = vs.running
+                    if not running:
+                        for index in capture_indexes():
+                            cap = cv2.VideoCapture(index)
+                            ok, _ = cap.read() if cap.isOpened() else (False, None)
+                            cap.release()
+                            if ok:
+                                print(f"[vision] USB camera found at index {index}")
+                                vs.start(camera=index)
+                                complained = False
+                                break
+                        else:
+                            if not complained:
+                                print("[vision] no usable camera yet; still looking")
+                                complained = True
+                # This thread is the only thing that can ever restore vision after a
+                # disconnect, so it must outlive any single failure.
+                except Exception as e:
+                    print(f"[vision] camera watch error: {type(e).__name__}: {e}",
+                          file=sys.stderr)
                 time.sleep(2)
         threading.Thread(target=camera_watch, name="uno-camera-watch", daemon=True).start()
     elif not args.no_camera:

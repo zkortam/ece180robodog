@@ -9,6 +9,7 @@ import base64
 import json
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import cv2
@@ -17,6 +18,12 @@ from flask import Flask, Response, jsonify, request, stream_with_context
 
 from . import config
 from .tts import sentence_chunks
+
+
+class Busy(Exception):
+    """Another turn is still running. Half-duplex is intentional, but waiting
+    forever behind a wedged turn is not: the caller gets a real answer instead."""
+
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -36,8 +43,8 @@ body{margin:0;background:
  min-height:100%;cursor:pointer;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",Inter,system-ui,sans-serif}
 body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.15;
  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.14'/%3E%3C/svg%3E")}
-.brand{position:fixed;top:clamp(22px,4vh,42px);left:50%;transform:translateX(-50%);font-size:10px;
- font-weight:700;letter-spacing:.32em;text-indent:.32em;color:#727b8e;text-transform:uppercase}
+.brand{position:fixed;top:clamp(22px,4vh,42px);left:50%;transform:translateX(-50%);font-size:13px;
+ font-weight:500;color:#727b8e}
 .presence{position:relative;width:min(62vw,62vh);height:min(62vw,62vh);display:grid;place-items:center;
  isolation:isolate;transition:filter .7s ease,opacity .5s ease,transform .7s cubic-bezier(.16,1,.3,1)}
 .presence:before,.presence:after{content:"";position:absolute;inset:5%;border-radius:50%;pointer-events:none}
@@ -75,8 +82,8 @@ body[data-state="thinking"] #face{animation:thinkBreath 1.7s ease-in-out infinit
 @keyframes blink{0%,95%,100%{transform:scaleY(1)}97.5%{transform:scaleY(.08)}}
 .readout{display:flex;flex-direction:column;align-items:center;gap:12px;min-height:92px;width:min(84vw,620px);z-index:2;
  transition:opacity .55s ease,transform .65s cubic-bezier(.2,.8,.2,1)}
-#mode{display:inline-flex;align-items:center;gap:9px;color:var(--muted);font-size:11px;font-weight:700;
- letter-spacing:.2em;text-indent:.2em;text-transform:uppercase;transition:color .35s}
+#mode{display:inline-flex;align-items:center;gap:9px;color:var(--muted);font-size:13px;font-weight:500;
+ transition:color .35s}
 #modeDot{width:6px;height:6px;border-radius:50%;background:currentColor;box-shadow:0 0 0 0 currentColor;transition:color .35s}
 body[data-state="listening"] #mode{color:var(--accent)}body[data-state="recording"] #mode{color:var(--active)}
 body[data-state="thinking"] #mode{color:var(--think)}body[data-state="speaking"] #mode{color:var(--speak)}
@@ -92,9 +99,9 @@ body[data-state="idle"] .hint{opacity:1}
  opacity:0;visibility:hidden;pointer-events:none;transition:opacity .38s ease,transform .65s cubic-bezier(.16,1,.3,1),visibility 0s linear .65s}
 body[data-vision="true"] .vision-lens{opacity:1;visibility:visible;transform:translate(-50%,-50%) scale(1);transition-delay:0s}
 .vision-head{display:flex;align-items:flex-end;justify-content:space-between;margin:0 3px 13px}
-.vision-kicker{color:var(--active);font-size:10px;font-weight:720;letter-spacing:.22em;text-transform:uppercase}
+.vision-kicker{color:var(--active);font-size:12px;font-weight:500}
 #visionTitle{margin-top:5px;color:var(--text);font-size:clamp(17px,2.5vw,22px);font-weight:570;letter-spacing:-.025em}
-.vision-live{display:flex;align-items:center;gap:7px;color:#788294;font-size:10px;font-weight:650;letter-spacing:.12em;text-transform:uppercase}
+.vision-live{display:flex;align-items:center;gap:7px;color:#788294;font-size:12px;font-weight:500}
 .vision-live:before{content:"";width:5px;height:5px;border-radius:50%;background:var(--active);box-shadow:0 0 10px rgba(98,237,189,.75);animation:livePulse 1.4s ease-in-out infinite}
 @keyframes livePulse{50%{opacity:.35}}
 .vision-frame{position:relative;aspect-ratio:4/3;overflow:hidden;border-radius:clamp(18px,3vw,28px);background:#11151d;
@@ -116,7 +123,7 @@ body[data-vision="true"] .vision-lens{opacity:1;visibility:visible;transform:tra
  color:#f2f5f7;font-size:11px;font-weight:620;text-shadow:0 1px 5px rgba(0,0,0,.8)}
 .track-label em{font-style:normal;color:#a7b0bd;font-weight:500}
 .vision-empty{position:absolute;z-index:4;left:50%;top:50%;transform:translate(-50%,-50%);color:#8b95a3;
- font-size:11px;font-weight:650;letter-spacing:.12em;text-transform:uppercase;opacity:0;transition:opacity .3s}
+ font-size:13px;font-weight:500;opacity:0;transition:opacity .3s}
 .vision-empty.show{opacity:1}
 .vision-foot{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:13px 3px 0;color:#747e8e;font-size:11px}
 #visionSummary{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vision-private{flex:none;color:#5d6674}
@@ -144,7 +151,7 @@ body[data-vision="true"] .vision-lens{opacity:1;visibility:visible;transform:tra
  <div class="hint">Click the face anytime to pause</div>
  <section id="visionLens" class="vision-lens" aria-hidden="true">
   <div class="vision-head">
-   <div><div class="vision-kicker">Visual context</div><div id="visionTitle">Reading the room</div></div>
+   <div><div class="vision-kicker">Camera</div><div id="visionTitle">Looking</div></div>
    <div class="vision-live">Local</div>
   </div>
   <div class="vision-frame">
@@ -187,7 +194,7 @@ function showVision(kind='analysis',enroll=null){
  if(kind==='enroll'&&enroll){
    const action=enroll.kind==='emotion'?'Learning '+(enroll.expression||'expression'):'Learning '+(enroll.name||'this face');
    visionTitle.textContent=action;visionSummary.textContent=(enroll.captured||0)+' of '+(enroll.target||0)+' clean views captured';
- }else{visionTitle.textContent='Reading the room';visionSummary.textContent='Checking identity and expression'}
+ }else{visionTitle.textContent='Looking';visionSummary.textContent='Checking who is there'}
  refreshVision();
 }
 function hideVision(){
@@ -200,7 +207,7 @@ function renderVision(scene){
  // Keep the last honest snapshot on screen instead of replacing it with a fake
  // "no face" result when that snapshot ages out.
  if(visionKind==='analysis'&&scene.feed_live===false&&visionMarks.childElementCount){
-   visionTitle.textContent='Visual context captured';visionSummary.textContent='Reasoning with the scene snapshot';return;
+   visionTitle.textContent='Got the frame';visionSummary.textContent='Thinking about it';return;
  }
  visionMarks.replaceChildren();visionEmpty.classList.toggle('show',!people.length);
  for(const p of people){
@@ -233,8 +240,12 @@ async function startAll(){
  say('Starting up…');
  try{micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}})}
  catch(e){started=false;fatal('Microphone blocked. Allow mic access for this page, then reload.');return}
- audioCtx=new (window.AudioContext||window.webkitAudioContext)();
- if(audioCtx.state==='suspended')await audioCtx.resume();
+ // A browser with no Web Audio (or one that refuses to resume the context) would
+ // otherwise leave the page "started" with a dead VAD and no way back.
+ try{
+  audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state==='suspended')await audioCtx.resume();
+ }catch(e){fatal('This browser blocked audio playback. Try Chrome or Safari, then reload.');return}
  const src=audioCtx.createMediaStreamSource(micStream);
  analyser=audioCtx.createAnalyser();analyser.fftSize=1024;analyser.smoothingTimeConstant=0.3;
  src.connect(analyser);dataArr=new Float32Array(analyser.fftSize);
@@ -261,7 +272,7 @@ function energy(){analyser.getFloatTimeDomainData(dataArr);let s=0;for(let i=0;i
 function beginListen(){
  // A queued restart must not silently undo a pause the user asked for.
  if(!handsFree||!started){convState='idle';face('');return}
- convState='listening';face('listening');say('Listening — just talk. No button to hold.');
+ convState='listening';face('listening');say('Listening');
  hasSpeech=false;voicedMs=0;silenceMs=0;speechMs=0;segStart=performance.now();pending=null;
  pcmChunks=[];pcmPreroll=[];
 }
@@ -358,7 +369,7 @@ async function sendStream(blob){
  try{
   while(true){
    const part=await reader.read();pendingText+=decoder.decode(part.value||new Uint8Array(),{stream:!part.done});
-   const lines=pendingText.split('\n');pendingText=lines.pop();
+   const lines=pendingText.split('\\n');pendingText=lines.pop();
    for(const line of lines){
     if(!line.trim())continue;let ev;try{ev=JSON.parse(line)}catch(e){throw new Error('invalid stream data')}
     if(ev.type==='meta'){
@@ -440,13 +451,21 @@ async function startCam(){
  // answering "no one is in view", and enroll then blames the user's lighting.
  try{vstream=await navigator.mediaDevices.getUserMedia({video:{width:320,height:240}});cam.srcObject=vstream;await cam.play();camOk=true}
  catch(e){camOk=false;say('Camera blocked — I can hear you but not see you. Allow camera access and reload.',true);return}
-setInterval(()=>{if(!cam.videoWidth||frameBusy||(convState==='thinking'&&!looking)||convState==='speaking')return;
+setInterval(()=>{
+  // Paused means paused: a user who clicked the face to stop the agent must not
+  // keep streaming their camera to the server. Enrollment is the one exception --
+  // it is already an explicit, in-progress request for the camera.
+  if(!started||(!handsFree&&!looking))return;
   // Pause vision inference while STT/LLM/TTS owns the small board CPU. The last
   // frame stays fresh enough for the current turn. Active enrollment is the one
   // exception: it needs fresh frames to collect the requested samples.
+  if(!cam.videoWidth||frameBusy||(convState==='thinking'&&!looking)||convState==='speaking')return;
+  // Claim the slot before toBlob, not inside its callback: encoding is async, so
+  // the next tick would otherwise fire a second upload while this one encodes.
+  frameBusy=true;
   vcanvas.width=cam.videoWidth;vcanvas.height=cam.videoHeight;
   vcanvas.getContext('2d').drawImage(cam,0,0,vcanvas.width,vcanvas.height);
-  vcanvas.toBlob(b=>{if(!b)return;frameBusy=true;const fd=new FormData();fd.append('frame',b,'f.jpg');
+  vcanvas.toBlob(b=>{if(!b){frameBusy=false;return}const fd=new FormData();fd.append('frame',b,'f.jpg');
    fetch('/api/vision/frame',{method:'POST',body:fd}).catch(()=>{}).finally(()=>{frameBusy=false})},'image/jpeg',0.7)},500);
 }
 
@@ -463,6 +482,22 @@ def create_app(agent, vision_service):
 
     page = PAGE.replace("__ENDPOINT_MS__", str(config.VAD_ENDPOINT_MS))
 
+    @contextmanager
+    def turn_slot():
+        """Serialize turns, but never queue behind one forever.
+
+        The agent is deliberately half-duplex, so a second request must wait. It
+        must not wait *unboundedly*: if a turn wedges (a stalled TTS subprocess, a
+        hung HTTP read), every later request used to block with no reply at all --
+        the UI sat in "Thinking…" until reload, and the board audio loop went deaf.
+        A bounded wait turns that into an answer the caller can recover from."""
+        if not agent.turn_lock.acquire(timeout=config.TURN_LOCK_TIMEOUT):
+            raise Busy("I'm still finishing the last answer — give me a second.")
+        try:
+            yield
+        finally:
+            agent.turn_lock.release()
+
     @app.after_request
     def disable_client_cache(response):
         # This is an appliance UI under active development. A stale cached page
@@ -476,17 +511,30 @@ def create_app(agent, vision_service):
     def index():
         return page
 
+    @app.get("/favicon.ico")
+    def favicon():
+        # Browsers ask for this on every load; answer it instead of logging a 404.
+        return Response(b"", mimetype="image/x-icon")
+
+    def _suffix(filestorage, default):
+        name = filestorage.filename or ""
+        ext = name.rsplit(".", 1)[-1] if "." in name else default
+        # A filename arrives from the browser: keep only a plain extension so it
+        # can never steer the temp path.
+        return "." + ("".join(c for c in ext if c.isalnum())[:8] or default)
+
     @app.post("/api/voice/turn")
     def voice_turn():
         f = request.files.get("audio")
         if not f:
             return jsonify({"error": "no audio"}), 400
-        suffix = "." + (f.filename.rsplit(".", 1)[-1] if "." in f.filename else "webm")
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=_suffix(f, "webm"), delete=True) as tmp:
             f.save(tmp.name)
             try:
-                with agent.turn_lock:
+                with turn_slot():
                     return jsonify(agent.handle_audio(tmp.name))
+            except Busy as e:
+                return jsonify({"error": str(e)}), 409
             except SystemExit as e:
                 return jsonify({"error": str(e)}), 503
             except Exception as e:
@@ -503,8 +551,7 @@ def create_app(agent, vision_service):
         f = request.files.get("audio")
         if not f:
             return jsonify({"error": "no audio"}), 400
-        suffix = "." + (f.filename.rsplit(".", 1)[-1] if "." in f.filename else "wav")
-        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp = tempfile.NamedTemporaryFile(suffix=_suffix(f, "wav"), delete=False)
         tmp.close()
         f.save(tmp.name)
 
@@ -513,7 +560,7 @@ def create_app(agent, vision_service):
 
         def generate():
             try:
-                with agent.turn_lock:
+                with turn_slot():
                     try:
                         out = agent.understand_audio(tmp.name)
                     except SystemExit as e:
@@ -552,6 +599,9 @@ def create_app(agent, vision_service):
                     yield event("done", timings_ms=timings, chunks=len(chunks))
             except GeneratorExit:
                 return
+            except Busy as e:
+                # Not fatal: the client falls back to the plain endpoint and can retry.
+                yield event("error", error=str(e), fatal=False)
             except Exception as e:
                 yield event("error", error=f"speech stream failed: {e}", fatal=False)
             finally:
@@ -561,10 +611,14 @@ def create_app(agent, vision_service):
 
     @app.post("/api/voice/text")
     def voice_text():
-        data = request.get_json(force=True)
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"error": "expected a JSON object with a 'text' field"}), 400
         try:
-            with agent.turn_lock:
+            with turn_slot():
                 return jsonify(agent.handle_text(str(data.get("text", ""))))
+        except Busy as e:
+            return jsonify({"error": str(e)}), 409
         except SystemExit as e:
             return jsonify({"error": str(e)}), 503
         except Exception as e:
@@ -583,10 +637,19 @@ def create_app(agent, vision_service):
         f = request.files.get("frame")
         if f is None:
             return jsonify({"ok": False, "reason": "no frame"}), 400
-        buf = np.frombuffer(f.read(), np.uint8)
-        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        raw = f.read()
+        # cv2.imdecode ASSERTS on an empty buffer instead of returning None, and a
+        # truncated upload (tab closing mid-POST) delivers exactly that -- which
+        # used to surface as an HTML 500 and a stack trace per dropped frame.
+        if not raw:
+            return jsonify({"ok": False, "reason": "empty frame"}), 400
+        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             return jsonify({"ok": False, "reason": "decode failed"}), 400
-        return jsonify(vision_service.submit_frame(img))
+        try:
+            return jsonify(vision_service.submit_frame(img))
+        except Exception as e:
+            # One bad frame must never take down the perception endpoint.
+            return jsonify({"ok": False, "reason": f"frame rejected: {e}"}), 400
 
     return app

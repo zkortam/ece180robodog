@@ -149,40 +149,79 @@ class TTS:
     def _ensure_piper(self):
         if self._piper_proc is not None and self._piper_proc.poll() is None:
             return self._piper_proc
+        # Reap the previous generation first. Spawning over a dead process leaked
+        # its pipes and its output directory on every respawn -- and Piper is
+        # respawned exactly when things are already going wrong.
+        self._stop_piper()
         piper = shutil.which(config.PIPER_BIN) or config.PIPER_BIN
         voice = config.PIPER_VOICE
         if not Path(voice).exists():
             raise TTSUnavailable(f"Piper voice not found: {voice} (run install_voice.sh)")
         self._piper_dir = tempfile.TemporaryDirectory(prefix="voice-piper-")
         self._piper_stderr.clear()
-        self._piper_proc = subprocess.Popen(
-            [piper, "--model", voice, "--output_dir", self._piper_dir.name,
-             "--sentence_silence", "0", "--length_scale", str(config.PIPER_LENGTH_SCALE)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1,
-        )
-        threading.Thread(target=self._drain_piper_stderr, daemon=True).start()
-        return self._piper_proc
-
-    def _drain_piper_stderr(self):
-        proc = self._piper_proc
-        if proc is None or proc.stderr is None:
-            return
-        for line in proc.stderr:
-            self._piper_stderr.append(line.strip())
-
-    def _stop_piper(self):
-        proc, self._piper_proc = self._piper_proc, None
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2)
-        if self._piper_dir is not None:
+        try:
+            self._piper_proc = subprocess.Popen(
+                [piper, "--model", voice, "--output_dir", self._piper_dir.name,
+                 "--sentence_silence", "0", "--length_scale", str(config.PIPER_LENGTH_SCALE)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1,
+            )
+        except OSError as e:
+            # No binary on PATH: clean up the directory we just made, then let the
+            # caller fall back to another backend.
             self._piper_dir.cleanup()
             self._piper_dir = None
+            raise TTSUnavailable(f"could not start piper ({config.PIPER_BIN}): {e}") from e
+        threading.Thread(target=self._drain_piper_stderr, args=(self._piper_proc,),
+                         daemon=True).start()
+        return self._piper_proc
+
+    def _drain_piper_stderr(self, proc):
+        # Take the process as an argument: reading self._piper_proc here would
+        # follow a respawn and quietly attribute the new process's stderr to it.
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            for line in proc.stderr:
+                self._piper_stderr.append(line.strip())
+        except (ValueError, OSError):
+            pass                                    # pipe closed by _stop_piper
+
+    def _stop_piper(self):
+        """Tear down the persistent Piper process and its output directory.
+
+        Every step is best-effort and the directory cleanup is in a `finally`:
+        this runs on the failure path, so it must not raise a *second* error over
+        the one that brought us here.
+        """
+        proc, self._piper_proc = self._piper_proc, None
+        try:
+            if proc is not None:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        try:
+                            proc.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            pass
+                for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                    try:
+                        if pipe is not None:
+                            pipe.close()
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+        finally:
+            if self._piper_dir is not None:
+                try:
+                    self._piper_dir.cleanup()
+                except OSError:
+                    pass
+                self._piper_dir = None
 
     # ---- macOS say (fallback) ----
     def _say(self, text):

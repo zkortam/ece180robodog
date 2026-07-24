@@ -48,12 +48,16 @@ class CerebrasClient:
         kw = {}
         if config.REASONING_EFFORT:
             kw["reasoning_effort"] = config.REASONING_EFFORT
+        # Cerebras rejects tool_choice/parallel_tool_calls unless tools are sent,
+        # so omit them entirely on a toolless call (e.g. the startup warm-up).
+        if tools:
+            kw["tools"] = tools
+            kw["tool_choice"] = "auto"
+            kw["parallel_tool_calls"] = True
         for attempt in range(retries + 1):
             try:
                 return self.client.chat.completions.create(
-                    model=self.model, messages=messages, tools=tools or None,
-                    tool_choice="auto" if tools else "none",
-                    parallel_tool_calls=True if tools else None,
+                    model=self.model, messages=messages,
                     max_completion_tokens=config.MAX_COMPLETION_TOKENS,
                     **kw,
                 )

@@ -40,8 +40,27 @@ VISION_THRESHOLD = float(_env("VOICE_THRESHOLD", "0.58"))
 # board default: moonshine ; mac dev default: faster-whisper (auto-detected)
 _IS_MAC = platform.system() == "Darwin"
 STT_BACKEND = _env("VOICE_STT", "faster-whisper" if _IS_MAC else "moonshine")
-# small.en is far more accurate than tiny.en and still fast on Apple Silicon CPU
-STT_MODEL = _env("VOICE_STT_MODEL", "small.en" if STT_BACKEND == "faster-whisper" else "tiny")
+# Model names are backend-specific and NOT interchangeable: Whisper wants
+# "small.en", Moonshine wants "tiny"/"base". Deriving one global default from the
+# platform's default backend silently mispaired them the moment anyone passed
+# --stt (e.g. --stt moonshine on a Mac asked Moonshine for "moonshine/small.en",
+# which does not exist). Resolve per backend, and let the env var still win.
+_STT_DEFAULT_MODELS = {
+    # small.en is far more accurate than tiny.en and still fast on Apple Silicon CPU
+    "faster-whisper": "small.en",
+    "whisper": "small.en",
+    "moonshine": "tiny",
+}
+
+
+def stt_model_for(backend):
+    """The model name to use with `backend`; VOICE_STT_MODEL overrides everything."""
+    override = os.environ.get("VOICE_STT_MODEL")
+    return override or _STT_DEFAULT_MODELS.get(backend, "tiny")
+
+
+STT_BACKENDS = tuple(_STT_DEFAULT_MODELS)
+STT_MODEL = stt_model_for(STT_BACKEND)
 
 # ---------- TTS ----------
 # mac dev: Kokoro (most natural, ONNX, CPU) if models present, else macOS `say`
@@ -61,6 +80,7 @@ if _IS_MAC:
 else:
     _default_tts = "piper"
 TTS_BACKEND = _env("VOICE_TTS", _default_tts)
+TTS_BACKENDS = ("kokoro", "piper", "say", "espeak")
 
 # ---------- Conversation ----------
 SYSTEM_PROMPT = _env("VOICE_SYSTEM_PROMPT", (
@@ -90,8 +110,13 @@ HISTORY_MAX_MESSAGES = int(_env("VOICE_HISTORY_MAX", "20"))
 # feel noticeably more responsive while still leaving room for a normal short
 # breath; deployments in noisy rooms can override this with VOICE_ENDPOINT_MS.
 VAD_ENDPOINT_MS = int(_env("VOICE_ENDPOINT_MS", "300"))
+# How long a request may wait for the in-flight turn before it is told the agent
+# is busy. Turns are half-duplex, so waiting is correct; waiting forever behind a
+# wedged turn is not -- that leaves the UI stuck in "Thinking…" with no way out.
+TURN_LOCK_TIMEOUT = float(_env("VOICE_TURN_LOCK_TIMEOUT", "45"))
 
-# ---------- Tool policy (risk tiers for MCP; vision tools are all read-only) ----------
+# ---------- Tool policy (risk tiers for MCP; vision tools read, except the two
+# enrollment writers -- see tools.py) ----------
 RISK_READONLY = "readonly"
 RISK_WRITE = "write"            # first-party local writes (enroll/train): allowed, but not read-only
 RISK_SENSITIVE = "sensitive"

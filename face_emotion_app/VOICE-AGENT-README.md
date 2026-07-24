@@ -8,23 +8,29 @@ hands-free, board-ready. Full design: [`../VOICE-AGENT-ARCHITECTURE.md`](../VOIC
 ## What's here
 
 ```
-vision_service.py            always-on perception loop over face_emotion.py + the 8 LLM tools
+vision_service.py            always-on perception loop over face_emotion.py + the LLM tools
 voice_agent/
   config.py                  all settings + env overrides (key read from CEREBRAS_API_KEY only)
-  tools.py                   the 8 read-only vision tool schemas + dispatch (Tier 0)
+  tools.py                   the 10 vision tool schemas + dispatch (Tier 0)
   tool_bus.py                merges local + MCP tools, dispatch-by-origin, identity-gate policy
   cerebras_client.py         OpenAI-compatible Cerebras client + tool-calling loop
   stt.py                     STT: faster-whisper (Mac) / moonshine (board)
-  tts.py                     TTS: say (Mac) / piper (board) / espeak (fallback)
+  tts.py                     TTS: kokoro (Mac) / piper (board) / say + espeak (fallbacks)
   orchestrator.py            VoiceAgent: one turn = audio -> STT -> LLM(tools) -> TTS -> audio
-  web.py                     Flask server + the hyper-minimal push-to-talk orb UI
+  board_audio.py             board-native USB mic/speaker loop (no browser needed)
+  web.py                     Flask server + the hands-free animated-face UI
   main.py                    entrypoint
-  vision_mcp_server.py       Tier 2: expose the SAME vision tools over MCP (optional)
+  vision_mcp_server.py       Tier 2: expose the read-only vision tools over MCP (optional)
 scripts/
   install_voice.sh           venv + deps + models (macOS and ARM Debian)
   run_voice.sh               launch
   smoke_cerebras.py          Phase 0: prove the LLM tool loop with your key
+  bench_latency.py           per-stage latency, per backend
 ```
+
+Eight of the ten tools only read perception state. The other two — `enroll_face`
+and `train_emotion` — write biometric data to the local databases, so they are
+registered as `RISK_WRITE` in `tool_bus.py` and are not exposed over MCP.
 
 Registration (`face_emotion.py` enroll + emotion-train) is **untouched**; this
 reads its DBs and picks up new enrollments via `VisionService.reload_db()`.
@@ -49,8 +55,11 @@ face again to pause. The line under the face always says what it is doing
 Enroll people first with the existing app (`python face_emotion.py web`) so it can
 name them.
 
-Useful flags: `./scripts/run_voice.sh --no-camera` (UI only), `--owner zakaria`
-(identity-gate sensitive actions), `--stt faster-whisper --tts say`.
+Useful flags: `--browser-camera` (frames come from the page — required on macOS,
+where the server cannot share the camera with the browser), `--no-camera` (UI
+only), `--owner zakaria` (identity-gate sensitive actions), `--stt faster-whisper
+--tts say`. Unknown backend names are rejected at startup rather than on the first
+spoken turn.
 
 ## Run it (Arduino UNO Q)
 
@@ -59,15 +68,23 @@ Useful flags: `./scripts/run_voice.sh --no-camera` (UI only), `--owner zakaria`
 sudo apt install -y espeak-ng               # TTS fallback
 export CEREBRAS_API_KEY=csk-...
 ./scripts/run_voice.sh --host 0.0.0.0       # STT=moonshine, TTS=piper auto-selected
+./scripts/run_voice.sh --host 0.0.0.0 --board-audio   # no browser: USB mic + speaker
 ```
 
 Attach a **USB headset** (mic+speaker) or open the page from a laptop/phone
 browser (recommended — free echo cancellation). Add a heatsink. Keep vision at
 `--fps 4`. See the architecture doc §2 (board budget) and §4.5 (audio).
 
+`--board-audio` runs the whole conversation on the device: it waits for a USB
+capture and playback device, discovers the camera across `/dev/video*` (and keeps
+retrying if one is unplugged), and answers out loud with no page open.
+
+Anyone who can reach the port can talk to the agent and read its perception
+state, so bind to `0.0.0.0` only on a network you trust — there is no auth layer.
+
 ## What is verified vs. what needs your key/hardware
 
-- **Verified working now:** the vision loop + all 8 tools (real models), the tool
+- **Verified working now:** the vision loop + all 10 tools (real models), the tool
   bus + identity-gating, the full turn loop (LLM+STT mocked, **TTS + tools + web
   real**), the entrypoint, and the UI serving.
 - **Needs your key:** the real Cerebras call (`smoke_cerebras.py` proves it once

@@ -31,7 +31,9 @@ def _is_artifact(text):
 class STT:
     def __init__(self, backend=None, model=None):
         self.backend = backend or config.STT_BACKEND
-        self.model_name = model or config.STT_MODEL
+        # Resolve the model FROM the chosen backend, not from the platform default:
+        # the two are not interchangeable (see config.stt_model_for).
+        self.model_name = model or config.stt_model_for(self.backend)
         self._impl = None
 
     def _load(self):
