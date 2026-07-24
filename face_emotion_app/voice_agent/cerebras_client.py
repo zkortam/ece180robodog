@@ -42,6 +42,20 @@ class CerebrasClient:
             timeout=30,
         )
 
+    def keepalive(self):
+        """Keep the pooled HTTPS connection to Cerebras hot.
+
+        The first request after an idle gap pays DNS, TCP and a TLS handshake
+        again, which shows up as a few hundred extra milliseconds on exactly the
+        turn a user notices most: the first thing they say after a pause. Listing
+        models is a cheap, untokened request that keeps the socket alive.
+        """
+        try:
+            self.client.models.list()
+            return True
+        except Exception:
+            return False       # the next real turn will re-establish it anyway
+
     def _create(self, messages, tools, retries=1):
         """Chat completion with ONE quick retry on a rate limit, then give up fast
         (free tier ~5 rpm). Better a quick 'one sec' than a 60s freeze."""

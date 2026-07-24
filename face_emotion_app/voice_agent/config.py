@@ -109,7 +109,7 @@ HISTORY_MAX_MESSAGES = int(_env("VOICE_HISTORY_MAX", "20"))
 # Silence (ms) after speech before the turn is closed. 300 ms makes the device
 # feel noticeably more responsive while still leaving room for a normal short
 # breath; deployments in noisy rooms can override this with VOICE_ENDPOINT_MS.
-VAD_ENDPOINT_MS = int(_env("VOICE_ENDPOINT_MS", "300"))
+VAD_ENDPOINT_MS = int(_env("VOICE_ENDPOINT_MS", "250"))
 # STT and TTS both default to one thread per core. That is right on an idle box
 # and actively harmful when anything else is busy: the pools oversubscribe, the
 # scheduler thrashes, and a short utterance that costs 1.5s at four threads costs

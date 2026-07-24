@@ -198,7 +198,7 @@ const API="http://127.0.0.1:8100";
 // When the board serves it directly, that route does not exist, so go to the
 // enrollment service on its own port.
 const ENROLL_URL=API?'/enroll':location.protocol+'//'+location.hostname+':8000';   // '' when the board serves the page; absolute when Vercel does
-const ENDPOINT_MS=300,MIN_SPEECH_MS=340,MAX_UTTER_MS=15000,LISTEN_RESET_MS=8000;
+const ENDPOINT_MS=250,MIN_SPEECH_MS=340,MAX_UTTER_MS=15000,LISTEN_RESET_MS=8000;
 // Someone talking across the room clears the onset threshold but never gets
 // close to the level of the person addressing the device. Requiring a near-field
 // peak drops that audio before it is ever uploaded, so it costs no latency either.

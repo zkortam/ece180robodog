@@ -157,6 +157,17 @@ def main():
                       ("stt", _warm_stt), ("llm", _warm_llm)):
         threading.Thread(target=_warm_one, args=(label, fn), daemon=True).start()
 
+    def _keepalive_loop():
+        """Hold the Cerebras connection open so no turn pays a cold handshake."""
+        while True:
+            time.sleep(45)
+            try:
+                agent._llm_client().keepalive()
+            except Exception:
+                pass          # no key yet, or offline; the next turn still works
+
+    threading.Thread(target=_keepalive_loop, name="llm-keepalive", daemon=True).start()
+
     app = create_app(agent, vs)
     print(f"[voice] STT={args.stt}  TTS={args.tts}  LLM={config.CEREBRAS_MODEL}")
     print(f"[voice] open http://{args.host}:{args.port}  (click the face once, then just talk)")
