@@ -114,6 +114,10 @@ VAD_ENDPOINT_MS = int(_env("VOICE_ENDPOINT_MS", "300"))
 # and actively harmful when anything else is busy: the pools oversubscribe, the
 # scheduler thrashes, and a short utterance that costs 1.5s at four threads costs
 # over 4s at eight. Half the cores is close to optimal loaded and costs little idle.
+# Origins allowed to drive this board from a page hosted elsewhere. *.vercel.app
+# is accepted implicitly; add explicit origins (e.g. a custom domain) here.
+ALLOWED_UI_ORIGINS = tuple(o for o in _env("VOICE_ALLOWED_ORIGINS", "").split(",") if o)
+
 CPU_THREADS = int(_env("VOICE_CPU_THREADS", str(max(2, min(4, (os.cpu_count() or 4) // 2)))))
 # How long a request may wait for the in-flight turn before it is told the agent
 # is busy. Turns are half-duplex, so waiting is correct; waiting forever behind a

@@ -1,31 +1,4 @@
-"""Browser transport: serves the hands-free voice UI (a smiley face whose mouth
-animates to the spoken audio) and runs one voice turn per request.
-
-Capture uses a continuous recorder with client-side voice-activity detection
-(pre-roll, so the first word is never clipped); it auto-detects when you stop,
-sends the utterance, speaks the reply while animating the mouth, then listens
-again. No buttons, no text."""
-import base64
-import json
-import tempfile
-import time
-from contextlib import contextmanager
-from pathlib import Path
-
-import cv2
-import numpy as np
-from flask import Flask, Response, jsonify, request, stream_with_context
-
-from . import config
-from .tts import sentence_chunks
-
-
-class Busy(Exception):
-    """Another turn is still running. Half-duplex is intentional, but waiting
-    forever behind a wedged turn is not: the caller gets a real answer instead."""
-
-
-PAGE = """<!doctype html>
+<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Aware</title>
@@ -190,8 +163,8 @@ let streamSources=new Set(),streamDone=false,playbackEnd=0,streamAbort=null;
 let voicedMs=0,silenceMs=0,speechMs=0,hasSpeech=false,pending=null;
 let visionOpen=false,visionKind='',visionBusy=false,turnUsedCamera=false;
 let outLevel=0,speakStart=0;   // live playback level + when speaking began, for barge-in
-const API=__API_BASE__;   // '' when the board serves the page; absolute when Vercel does
-const ENDPOINT_MS=__ENDPOINT_MS__,MIN_SPEECH_MS=240,MAX_UTTER_MS=15000,LISTEN_RESET_MS=8000;
+const API="http://127.0.0.1:8100";   // '' when the board serves the page; absolute when Vercel does
+const ENDPOINT_MS=300,MIN_SPEECH_MS=240,MAX_UTTER_MS=15000,LISTEN_RESET_MS=8000;
 // Barge-in must survive the speaker-to-mic path. Without a grace window, a hold
 // long enough to exclude a syllable of echo, and a threshold that rises with the
 // current playback level, the reply interrupts ITSELF and is never heard.
@@ -382,11 +355,11 @@ async function sendLegacy(blob){
  catch(e){fatal('Server error '+r.status+'. Check the terminal running the agent.');return}
  // 503 = the server is misconfigured (bad/missing key, token budget). Every turn
  // fails identically, so stop and show it rather than looping silently forever.
- if(r.status===503){fatal((j.error||'Server not configured.').split('\\n')[0]);return}
- if(j.error){hideVision();say('<b>Heard:</b> '+esc(j.transcript||'(you)')+'\\n'+esc(j.error),true);setTimeout(beginListen,2600);return}
+ if(r.status===503){fatal((j.error||'Server not configured.').split('\n')[0]);return}
+ if(j.error){hideVision();say('<b>Heard:</b> '+esc(j.transcript||'(you)')+'\n'+esc(j.error),true);setTimeout(beginListen,2600);return}
  if(!j.transcript){hideVision();say("Didn't catch that. Say it again.");setTimeout(beginListen,900);return}
- if(j.audio_b64){say('<b>You:</b> '+esc(j.transcript)+'\\n<b>Me:</b> '+esc(j.reply));play(j.audio_b64)}
- else{hideVision();say('<b>You:</b> '+esc(j.transcript)+'\\n<b>Me:</b> '+esc(j.reply||'(no reply)')+'\\n(no voice audio)');setTimeout(beginListen,1800)}
+ if(j.audio_b64){say('<b>You:</b> '+esc(j.transcript)+'\n<b>Me:</b> '+esc(j.reply));play(j.audio_b64)}
+ else{hideVision();say('<b>You:</b> '+esc(j.transcript)+'\n<b>Me:</b> '+esc(j.reply||'(no reply)')+'\n(no voice audio)');setTimeout(beginListen,1800)}
 }
 async function sendStream(blob){
  const fd=new FormData();fd.append('audio',blob,'turn.wav');
@@ -399,23 +372,23 @@ async function sendStream(blob){
  try{
   while(true){
    const part=await reader.read();pendingText+=decoder.decode(part.value||new Uint8Array(),{stream:!part.done});
-   const lines=pendingText.split('\\n');pendingText=lines.pop();
+   const lines=pendingText.split('\n');pendingText=lines.pop();
    for(const line of lines){
     if(!line.trim())continue;let ev;try{ev=JSON.parse(line)}catch(e){throw new Error('invalid stream data')}
     if(ev.type==='meta'){
       gotMeta=true;transcript=ev.transcript||'';
       if(usedCamera(ev.tools)){turnUsedCamera=true;showVision('analysis')}
       if(!transcript){hideVision();say("Didn't catch that. Say it again.");continue}
-      say('<b>You:</b> '+esc(transcript)+'\\n<b>Me:</b> '+esc(ev.reply||''));
+      say('<b>You:</b> '+esc(transcript)+'\n<b>Me:</b> '+esc(ev.reply||''));
     }else if(ev.type==='audio'&&ev.audio_b64){
       gotAudio=true;await queueStreamAudio(ev.audio_b64);
     }else if(ev.type==='done'){
       streamDone=true;
       if(!transcript){setTimeout(beginListen,900)}
-      else if(!gotAudio){hideVision();say('<b>You:</b> '+esc(transcript)+'\\n(no voice audio)',true);setTimeout(beginListen,1800)}
+      else if(!gotAudio){hideVision();say('<b>You:</b> '+esc(transcript)+'\n(no voice audio)',true);setTimeout(beginListen,1800)}
       else finishStreamIfReady();
     }else if(ev.type==='error'){
-      if(ev.fatal){fatal((ev.error||'Server not configured.').split('\\n')[0]);return true}
+      if(ev.fatal){fatal((ev.error||'Server not configured.').split('\n')[0]);return true}
       throw new Error(ev.error||'speech stream failed');
     }
    }
@@ -507,203 +480,3 @@ faceEl.addEventListener('click',e=>{e.stopPropagation();if(!started)startAll();e
 document.body.addEventListener('click',()=>{if(!started)startAll()});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&started&&(convState==='listening'||convState==='recording'))restartSeg()});
 </script></body></html>
-"""
-
-
-def create_app(agent, vision_service):
-    app = Flask(__name__)
-
-    page = (PAGE.replace("__ENDPOINT_MS__", str(config.VAD_ENDPOINT_MS))
-                .replace("__API_BASE__", '""'))   # same-origin when the board serves it
-
-    # A copy of the UI can be hosted elsewhere (Vercel) and still drive this board
-    # over the laptop's forwarded port. Browsers treat http://127.0.0.1 as a
-    # trustworthy origin, so an HTTPS page may call it, but the request is still
-    # cross-origin AND public->private: it needs CORS plus the Private Network
-    # Access opt-in, including on the preflight.
-    @app.after_request
-    def allow_hosted_ui(response):
-        origin = request.headers.get("Origin")
-        if origin and (origin.endswith(".vercel.app") or origin in config.ALLOWED_UI_ORIGINS):
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Vary"] = "Origin"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-            response.headers["Access-Control-Allow-Private-Network"] = "true"
-        return response
-
-    @app.route("/api/<path:_rest>", methods=["OPTIONS"])
-    def preflight(_rest):
-        return ("", 204)
-
-    @contextmanager
-    def turn_slot():
-        """Serialize turns, but never queue behind one forever.
-
-        The agent is deliberately half-duplex, so a second request must wait. It
-        must not wait *unboundedly*: if a turn wedges (a stalled TTS subprocess, a
-        hung HTTP read), every later request used to block with no reply at all --
-        the UI sat in "Thinking…" until reload, and the board audio loop went deaf.
-        A bounded wait turns that into an answer the caller can recover from."""
-        if not agent.turn_lock.acquire(timeout=config.TURN_LOCK_TIMEOUT):
-            raise Busy("I'm still finishing the last answer — give me a second.")
-        try:
-            yield
-        finally:
-            agent.turn_lock.release()
-
-    @app.after_request
-    def disable_client_cache(response):
-        # This is an appliance UI under active development. A stale cached page
-        # can keep sending an obsolete audio codec even after the board is fixed.
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-        return response
-
-    @app.get("/")
-    def index():
-        return page
-
-    @app.get("/favicon.ico")
-    def favicon():
-        # Browsers ask for this on every load; answer it instead of logging a 404.
-        return Response(b"", mimetype="image/x-icon")
-
-    def _suffix(filestorage, default):
-        name = filestorage.filename or ""
-        ext = name.rsplit(".", 1)[-1] if "." in name else default
-        # A filename arrives from the browser: keep only a plain extension so it
-        # can never steer the temp path.
-        return "." + ("".join(c for c in ext if c.isalnum())[:8] or default)
-
-    @app.post("/api/voice/turn")
-    def voice_turn():
-        f = request.files.get("audio")
-        if not f:
-            return jsonify({"error": "no audio"}), 400
-        with tempfile.NamedTemporaryFile(suffix=_suffix(f, "webm"), delete=True) as tmp:
-            f.save(tmp.name)
-            try:
-                with turn_slot():
-                    return jsonify(agent.handle_audio(tmp.name))
-            except Busy as e:
-                return jsonify({"error": str(e)}), 409
-            except SystemExit as e:
-                return jsonify({"error": str(e)}), 503
-            except Exception as e:
-                return jsonify({"error": f"turn failed: {e}"}), 500
-
-    @app.post("/api/voice/turn-stream")
-    def voice_turn_stream():
-        """NDJSON metadata followed by independently playable sentence WAVs.
-
-        The original JSON endpoint above stays untouched as a compatibility and
-        browser fallback path. Streaming changes only when playback may begin; STT,
-        LLM/tool behavior, reply text, and Piper voice are shared with the old path.
-        """
-        f = request.files.get("audio")
-        if not f:
-            return jsonify({"error": "no audio"}), 400
-        tmp = tempfile.NamedTemporaryFile(suffix=_suffix(f, "wav"), delete=False)
-        tmp.close()
-        f.save(tmp.name)
-
-        def event(kind, **fields):
-            return json.dumps({"type": kind, **fields}, ensure_ascii=False) + "\n"
-
-        def generate():
-            try:
-                with turn_slot():
-                    try:
-                        out = agent.understand_audio(tmp.name)
-                    except SystemExit as e:
-                        yield event("error", error=str(e), fatal=True)
-                        return
-                    except Exception as e:
-                        yield event("error", error=f"turn failed: {e}", fatal=False)
-                        return
-
-                    yield event("meta", transcript=out.get("transcript", ""),
-                                reply=out.get("reply", ""), tools=out.get("tools", []),
-                                timings_ms=out.get("timings_ms", {}))
-                    if not out.get("transcript"):
-                        yield event("done", timings_ms=out.get("timings_ms", {}), chunks=0)
-                        return
-
-                    chunks = sentence_chunks(out.get("reply", ""))
-                    t_tts = time.perf_counter()
-                    first_ms = None
-                    for index, text_part in enumerate(chunks):
-                        wav = agent.tts.synth(text_part)
-                        if first_ms is None:
-                            first_ms = (time.perf_counter() - t_tts) * 1000
-                        yield event("audio", index=index, text=text_part,
-                                    audio_b64=base64.b64encode(wav).decode() if wav else "")
-                    tts_ms = (time.perf_counter() - t_tts) * 1000
-                    timings = dict(out.get("timings_ms", {}))
-                    timings.update(
-                        tts=round(tts_ms, 1),
-                        first_audio=round(first_ms or 0.0, 1),
-                        total=round(timings.get("stt", 0.0) + timings.get("llm", 0.0) + tts_ms, 1),
-                    )
-                    print(f"[voice] stream: stt={timings.get('stt', 0):.0f}ms "
-                          f"llm={timings.get('llm', 0):.0f}ms first_audio={first_ms or 0:.0f}ms "
-                          f"tts={tts_ms:.0f}ms chunks={len(chunks)}", flush=True)
-                    yield event("done", timings_ms=timings, chunks=len(chunks))
-            except GeneratorExit:
-                return
-            except Busy as e:
-                # Not fatal: the client falls back to the plain endpoint and can retry.
-                yield event("error", error=str(e), fatal=False)
-            except Exception as e:
-                yield event("error", error=f"speech stream failed: {e}", fatal=False)
-            finally:
-                Path(tmp.name).unlink(missing_ok=True)
-
-        return Response(stream_with_context(generate()), mimetype="application/x-ndjson")
-
-    @app.post("/api/voice/text")
-    def voice_text():
-        data = request.get_json(silent=True)
-        if not isinstance(data, dict):
-            return jsonify({"error": "expected a JSON object with a 'text' field"}), 400
-        try:
-            with turn_slot():
-                return jsonify(agent.handle_text(str(data.get("text", ""))))
-        except Busy as e:
-            return jsonify({"error": str(e)}), 409
-        except SystemExit as e:
-            return jsonify({"error": str(e)}), 503
-        except Exception as e:
-            return jsonify({"error": f"turn failed: {e}"}), 500
-
-    @app.get("/api/vision/scene")
-    def scene():
-        return jsonify(vision_service.describe_scene())
-
-    @app.get("/api/vision/enroll_status")
-    def enroll_status():
-        return jsonify(vision_service.enroll_status())
-
-    @app.post("/api/vision/frame")
-    def vision_frame():
-        f = request.files.get("frame")
-        if f is None:
-            return jsonify({"ok": False, "reason": "no frame"}), 400
-        raw = f.read()
-        # cv2.imdecode ASSERTS on an empty buffer instead of returning None, and a
-        # truncated upload (tab closing mid-POST) delivers exactly that -- which
-        # used to surface as an HTML 500 and a stack trace per dropped frame.
-        if not raw:
-            return jsonify({"ok": False, "reason": "empty frame"}), 400
-        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-        if img is None:
-            return jsonify({"ok": False, "reason": "decode failed"}), 400
-        try:
-            return jsonify(vision_service.submit_frame(img))
-        except Exception as e:
-            # One bad frame must never take down the perception endpoint.
-            return jsonify({"ok": False, "reason": f"frame rejected: {e}"}), 400
-
-    return app
