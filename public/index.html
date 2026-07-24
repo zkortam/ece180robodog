@@ -19,7 +19,7 @@
  --blur-glass:16px;--blur-hero:80px;
  --ease:cubic-bezier(.4,0,.2,1);
 
- --voice-glow:0px;--voice-scale:0;--accent:var(--calm);
+ --voice-level:0;--voice-scale:0;--accent:var(--calm);
 }
 *{box-sizing:border-box}
 html,body{height:100%}
@@ -38,17 +38,23 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
 .presence{position:relative;z-index:1;display:grid;place-items:center;
  width:min(46vw,46vh);height:min(46vw,46vh);
  transition:transform .8s var(--ease),opacity .6s var(--ease),filter .6s var(--ease)}
-/* A single halo that breathes with the voice level. No rings, no orbits, no spinners. */
+/* A single halo that breathes with the voice level. No rings, no orbits, no spinners.
+   Opacity and transform are the only per-frame properties: both are composited, so
+   the voice drives them at 60fps for free. Blur is deliberately CONSTANT -- animating
+   a blur radius re-rasterizes the whole gradient every frame and visibly stutters.
+   Neither gets a transition either: they are already updated every frame, and a
+   transition would restart 60 times a second and lag behind the voice. */
 .presence:before{content:"";position:absolute;inset:-14%;border-radius:50%;pointer-events:none;
  background:radial-gradient(circle,color-mix(in srgb,var(--accent) 22%,transparent) 0,transparent 68%);
- opacity:.30;transform:scale(calc(1 + var(--voice-scale)));
- filter:blur(calc(26px + var(--voice-glow) * .35));
- transition:opacity .7s var(--ease),transform .35s var(--ease),background .9s var(--ease)}
-body[data-state="idle"] .presence:before{opacity:.14}
-body[data-state="listening"] .presence:before{opacity:.34}
-body[data-state="recording"] .presence:before{opacity:.52}
-body[data-state="thinking"] .presence:before{opacity:.30}
-body[data-state="speaking"] .presence:before{opacity:.46}
+ opacity:calc(var(--halo-base) + var(--voice-level) * .34);
+ transform:scale(calc(1 + var(--voice-scale)));
+ filter:blur(30px);will-change:opacity,transform;
+ transition:background .9s var(--ease)}
+body{--halo-base:.14}
+body[data-state="listening"]{--halo-base:.30}
+body[data-state="recording"]{--halo-base:.42}
+body[data-state="thinking"]{--halo-base:.28}
+body[data-state="speaking"]{--halo-base:.38}
 
 body[data-state="listening"]{--accent:var(--calm)}
 body[data-state="recording"]{--accent:var(--calm)}
@@ -112,6 +118,13 @@ body[data-vision="true"] .vision-lens{opacity:1;visibility:visible;transform:tra
 #visionSummary{color:var(--text-4);font-size:13px;font-weight:400;
  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
+.enroll-link{position:fixed;z-index:9;right:clamp(16px,2.5vw,28px);bottom:clamp(16px,2.5vh,26px);
+ padding:9px 15px;border-radius:var(--r-full);color:var(--text-3);font-size:13px;font-weight:500;
+ text-decoration:none;background:var(--glass);border:1px solid var(--glass-border);
+ backdrop-filter:blur(var(--blur-glass));-webkit-backdrop-filter:blur(var(--blur-glass));
+ transition:color .3s var(--ease),background .3s var(--ease),border-color .3s var(--ease)}
+.enroll-link:hover{color:var(--text);background:var(--glass-2);border-color:var(--glass-border-2)}
+body[data-vision="true"] .enroll-link{opacity:0;pointer-events:none}
 @media (max-height:620px){
  .presence{width:min(38vw,38vh);height:min(38vw,38vh)}
  .vision-lens{width:min(64vw,420px)}
@@ -147,6 +160,7 @@ body[data-vision="true"] .vision-lens{opacity:1;visibility:visible;transform:tra
   </div>
   <div class="vision-foot"><span id="visionTitle">Looking</span><span id="visionSummary"></span></div>
  </section>
+ <a class="enroll-link" id="enrollLink" target="_blank" rel="noopener">Manage people</a>
  <canvas id="vcanvas" style="display:none"></canvas>
 <script>
 const faceEl=document.getElementById('face'),smile=document.getElementById('smile'),mouth=document.getElementById('mouth'),
@@ -160,11 +174,16 @@ let micStream=null,audioCtx=null,analyser=null,dataArr=null,lastT=0;
 let calibrated=false,calibVals=[],noiseFloor=0.01;
 let convState='idle',pcmNode=null,silentGain=null,pcmChunks=[],pcmPreroll=[],segStart=0,curSrc=null;
 let streamSources=new Set(),streamDone=false,playbackEnd=0,streamAbort=null;
-let voicedMs=0,silenceMs=0,speechMs=0,hasSpeech=false,pending=null;
+let voicedMs=0,silenceMs=0,speechMs=0,hasSpeech=false,pending=null,peakE=0;
 let visionOpen=false,visionKind='',visionBusy=false,turnUsedCamera=false;
 let outLevel=0,speakStart=0,frameTick=0;   // live playback level + when speaking began, for barge-in
-const API="http://127.0.0.1:8100";   // '' when the board serves the page; absolute when Vercel does
-const ENDPOINT_MS=300,MIN_SPEECH_MS=240,MAX_UTTER_MS=15000,LISTEN_RESET_MS=8000;
+const API="http://127.0.0.1:8100";
+const ENROLL_URL=(API||location.protocol+'//'+location.hostname+':8100').replace(/:\d+$/,':8000');   // '' when the board serves the page; absolute when Vercel does
+const ENDPOINT_MS=300,MIN_SPEECH_MS=340,MAX_UTTER_MS=15000,LISTEN_RESET_MS=8000;
+// Someone talking across the room clears the onset threshold but never gets
+// close to the level of the person addressing the device. Requiring a near-field
+// peak drops that audio before it is ever uploaded, so it costs no latency either.
+const NEAR_FIELD_MIN=0.055,NEAR_FIELD_MULT=6;
 // Barge-in must survive the speaker-to-mic path. Without a grace window, a hold
 // long enough to exclude a syllable of echo, and a threshold that rises with the
 // current playback level, the reply interrupts ITSELF and is never heard.
@@ -251,7 +270,7 @@ async function startAll(){
    if(!started||!handsFree)return;
    const block=new Float32Array(ev.inputBuffer.getChannelData(0));
    if(convState==='listening'){
-     pcmPreroll.push(block);if(pcmPreroll.length>12)pcmPreroll.shift();
+     pcmPreroll.push(block);if(pcmPreroll.length>6)pcmPreroll.shift();
    }else if(convState==='recording'){
      if(!pcmChunks.length)pcmChunks=pcmPreroll.slice();
      pcmChunks.push(block);
@@ -260,6 +279,15 @@ async function startAll(){
  calibrated=false;calibVals=[];noiseFloor=0.01;lastT=performance.now();
  startCam();beginListen();requestAnimationFrame(vadLoop);
 }
+let voiceSmooth=0;
+function setVoiceLevel(level){
+ // The analyser is jumpy frame to frame; unsmoothed it reads as flicker rather
+ // than breath. One exponential filter here serves both the mic and playback.
+ voiceSmooth+=(Math.min(1,Math.max(0,level||0))-voiceSmooth)*.28;
+ const st=document.documentElement.style;
+ st.setProperty('--voice-level',voiceSmooth.toFixed(3));
+ st.setProperty('--voice-scale',(voiceSmooth*.05).toFixed(4));
+}
 function energy(){analyser.getFloatTimeDomainData(dataArr);let s=0;for(let i=0;i<dataArr.length;i++){const v=dataArr[i];s+=v*v}return Math.sqrt(s/dataArr.length)}
 
 function beginListen(){
@@ -267,7 +295,7 @@ function beginListen(){
  if(!handsFree||!started){convState='idle';face('');return}
  hideVision();   // a new turn starts clean; last turn's camera panel closes here
  convState='listening';face('listening');say('Listening');
- hasSpeech=false;voicedMs=0;silenceMs=0;speechMs=0;segStart=performance.now();pending=null;
+ hasSpeech=false;voicedMs=0;silenceMs=0;speechMs=0;segStart=performance.now();pending=null;peakE=0;
  pcmChunks=[];pcmPreroll=[];
 }
 // The camera panel is evidence of looking, not decoration: it opens only after
@@ -275,7 +303,9 @@ function beginListen(){
 // put a face-scanning overlay on "what time is it".
 const CAMERA_TOOLS=new Set(['who_is_in_view','describe_scene','get_person_emotion','enroll_face','train_emotion','start_watching']);
 function usedCamera(trace){return Array.isArray(trace)&&trace.some(t=>CAMERA_TOOLS.has(t&&t.tool))}
-function endpoint(){if(convState!=='recording')return;turnUsedCamera=false;convState='thinking';face('thinking');say('Thinking…');sendUtterance()}
+function endpoint(){if(convState!=='recording')return;
+ if(peakE<Math.max(NEAR_FIELD_MIN,noiseFloor*NEAR_FIELD_MULT)){beginListen();return}
+ turnUsedCamera=false;convState='thinking';face('thinking');say('Thinking…');sendUtterance()}
 function restartSeg(){beginListen()}
 
 function vadLoop(){
@@ -283,12 +313,12 @@ function vadLoop(){
  const now=performance.now();let dt=now-lastT;lastT=now;if(dt>250)dt=0;else if(dt>100)dt=100;
  const e=energy();
  const visualLevel=Math.min(1,Math.max(0,(e-noiseFloor)*18));
- document.documentElement.style.setProperty('--voice-glow',(visualLevel*70).toFixed(1)+'px');
- document.documentElement.style.setProperty('--voice-scale',(visualLevel*.04).toFixed(3));
+ setVoiceLevel(visualLevel);
  if(!calibrated){calibVals.push(e);if(calibVals.length>=25){const s=[...calibVals].sort((a,b)=>a-b);noiseFloor=Math.max(0.005,s[Math.floor(s.length*0.25)]);calibrated=true}}
  else if(convState==='listening'&&!hasSpeech&&e<noiseFloor*2.2){noiseFloor=Math.max(0.004,noiseFloor*0.98+e*0.02)}
  const onset=Math.max(0.018,noiseFloor*3.2),keep=Math.max(0.010,noiseFloor*1.7),barge=Math.max(0.06,noiseFloor*6.5);
  if(convState==='listening'||convState==='recording'){
+   if(e>peakE)peakE=e;
    if(e>onset){voicedMs+=dt;silenceMs=0;
      if(!hasSpeech&&voicedMs>=110){hasSpeech=true;convState='recording';face('recording');say('Hearing you…')}
      if(hasSpeech)speechMs+=dt;
@@ -415,7 +445,7 @@ async function queueStreamAudio(b64){
  src.connect(an);an.connect(audioCtx.destination);streamSources.add(src);
  const when=Math.max(audioCtx.currentTime+.025,playbackEnd);playbackEnd=when+buf.duration;
  src.onended=()=>{streamSources.delete(src);finishStreamIfReady()};src.start(when);
- (function ml(){if(!streamSources.has(src))return;an.getFloatTimeDomainData(md);let s=0;for(let i=0;i<md.length;i++){const v=md[i];s+=v*v}const level=Math.min(1,Math.sqrt(s/md.length)*9);outLevel=level;setMouth(level);document.documentElement.style.setProperty('--voice-glow',(level*70).toFixed(1)+'px');document.documentElement.style.setProperty('--voice-scale',(level*.04).toFixed(3));requestAnimationFrame(ml)})();
+ (function ml(){if(!streamSources.has(src))return;an.getFloatTimeDomainData(md);let s=0;for(let i=0;i<md.length;i++){const v=md[i];s+=v*v}const level=Math.min(1,Math.sqrt(s/md.length)*9);outLevel=level;setMouth(level);setVoiceLevel(level);requestAnimationFrame(ml)})();
 }
 function finishStreamIfReady(){if(streamDone&&streamSources.size===0){speakingMouth(false);afterSpeak()}}
 async function play(b64){
@@ -429,7 +459,7 @@ async function play(b64){
  src.connect(an);an.connect(audioCtx.destination);curSrc=src;
  src.onended=()=>{if(curSrc===src)curSrc=null;speakingMouth(false);afterSpeak()};
  src.start();
- (function ml(){if(curSrc!==src)return;an.getFloatTimeDomainData(md);let s=0;for(let i=0;i<md.length;i++){const v=md[i];s+=v*v}const level=Math.min(1,Math.sqrt(s/md.length)*9);outLevel=level;setMouth(level);document.documentElement.style.setProperty('--voice-glow',(level*70).toFixed(1)+'px');document.documentElement.style.setProperty('--voice-scale',(level*.04).toFixed(3));requestAnimationFrame(ml)})();
+ (function ml(){if(curSrc!==src)return;an.getFloatTimeDomainData(md);let s=0;for(let i=0;i<md.length;i++){const v=md[i];s+=v*v}const level=Math.min(1,Math.sqrt(s/md.length)*9);outLevel=level;setMouth(level);setVoiceLevel(level);requestAnimationFrame(ml)})();
 }
 function afterSpeak(){if(handsFree)beginListen();else{convState='idle';face('')}}
 function stopAllAudio(){
@@ -482,5 +512,6 @@ setInterval(()=>{
 function togglePause(){handsFree=!handsFree;if(handsFree){beginListen()}else{if(streamAbort){streamAbort.abort();streamAbort=null}streamDone=true;stopAllAudio();hideVision();pcmChunks=[];pcmPreroll=[];convState='idle';face('');say('Paused. Click the face to resume.')}}
 faceEl.addEventListener('click',e=>{e.stopPropagation();if(!started)startAll();else togglePause()});
 document.body.addEventListener('click',()=>{if(!started)startAll()});
+document.getElementById('enrollLink').href=ENROLL_URL;
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&started&&(convState==='listening'||convState==='recording'))restartSeg()});
 </script></body></html>
