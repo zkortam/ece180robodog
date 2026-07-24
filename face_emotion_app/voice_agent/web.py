@@ -205,7 +205,10 @@ let voicedMs=0,silenceMs=0,speechMs=0,hasSpeech=false,pending=null,peakE=0;
 let visionOpen=false,visionKind='',visionBusy=false,turnUsedCamera=false;
 let outLevel=0,speakStart=0,frameTick=0;   // live playback level + when speaking began, for barge-in
 const API=__API_BASE__;
-const ENROLL_URL=(API||location.protocol+'//'+location.hostname+':8100').replace(/:\d+$/,':8000');   // '' when the board serves the page; absolute when Vercel does
+// When this page is hosted, its own /enroll route serves the enrollment UI.
+// When the board serves it directly, that route does not exist, so go to the
+// enrollment service on its own port.
+const ENROLL_URL=API?'/enroll':location.protocol+'//'+location.hostname+':8000';   // '' when the board serves the page; absolute when Vercel does
 const ENDPOINT_MS=__ENDPOINT_MS__,MIN_SPEECH_MS=340,MAX_UTTER_MS=15000,LISTEN_RESET_MS=8000;
 // Someone talking across the room clears the onset threshold but never gets
 // close to the level of the person addressing the device. Requiring a near-field

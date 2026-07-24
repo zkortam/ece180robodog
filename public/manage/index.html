@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Face</title>
+<style>
+:root{
+  --bg:#f4f4f4; --fg:#171717; --muted:#737373; --line:#dedede;
+  --card:#ffffff; --accent:#141414;
+  --pos:#2f9e5f; --neg:#d84b3f; --neu:#9a9a94;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0d0d0e; --fg:#f1f1f1; --muted:#a0a0a0; --line:#2b2b2d;
+    --card:#171719; --accent:#f1f1f1;
+    --pos:#4bd07f; --neg:#ff6a5c; --neu:#75756f;
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  display:flex;align-items:flex-start;justify-content:center;min-height:100%;padding:48px 32px;
+}
+.app{
+  width:100%;max-width:1120px;display:grid;
+  grid-template-columns:minmax(0,1.55fr) minmax(350px,.8fr);
+  gap:24px;align-items:start;
+}
+.stage{
+  position:relative;aspect-ratio:4/3;width:100%;background:#000;
+  border-radius:12px;overflow:hidden;border:1px solid var(--line);cursor:pointer;
+}
+.panel{
+  background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px;
+}
+.panel-title{font-size:22px;font-weight:650;letter-spacing:-.01em;margin:0 0 24px}
+video{width:100%;height:100%;object-fit:cover;display:block;transform:scaleX(-1);visibility:hidden}
+.camera-on video{visibility:visible}
+.hint{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:rgba(255,255,255,.62);font-size:14px;
+  transition:opacity .3s ease;pointer-events:none;
+}
+.hint.gone{opacity:0}
+.guide{
+  position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+  pointer-events:none;background:rgba(0,0,0,.10);
+}
+.guide.on{display:flex}
+.guide-box{
+  width:58%;height:76%;border:2px solid rgba(255,255,255,.82);border-radius:46% 46% 42% 42%;
+  box-shadow:0 0 0 999px rgba(0,0,0,.18);transition:border-color .15s,box-shadow .15s;
+}
+.guide.ok .guide-box{border-color:var(--pos);box-shadow:0 0 0 999px rgba(0,0,0,.12),0 0 24px rgba(47,158,95,.4)}
+.guide-prompt{
+  position:absolute;left:18px;right:18px;top:16px;text-align:center;color:#fff;
+  font-size:17px;font-weight:600;text-shadow:0 1px 5px rgba(0,0,0,.8);
+}
+.readout{
+  position:absolute;left:0;right:0;bottom:0;padding:20px 20px 18px;
+  background:linear-gradient(to top,rgba(0,0,0,.66),rgba(0,0,0,0));
+  color:#fff;opacity:0;transform:translateY(6px);
+  transition:opacity .28s ease,transform .28s ease;pointer-events:none;
+}
+.readout.on{opacity:1;transform:none}
+.name{font-size:27px;font-weight:600;letter-spacing:-.01em;line-height:1.05}
+.name.unknown{color:#d0d0cb;font-weight:500}
+.meta{margin-top:6px;font-size:14px;color:rgba(255,255,255,.82);
+  display:flex;align-items:center;gap:9px;min-height:14px}
+.tag{color:rgba(255,255,255,.62);font-size:14px}
+.field{margin:0 0 12px}
+.field label{display:block;margin-bottom:7px;font-size:14px;font-weight:550}
+.field input{
+  width:100%;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit;
+  font-size:16px;text-align:left;padding:11px 12px;outline:none;transition:border-color .2s;
+}
+.field input:focus{border-color:var(--accent)}
+.field input::placeholder{color:var(--muted)}
+.row{display:flex;gap:10px}
+button{
+  flex:1;font:inherit;font-size:14px;font-weight:550;padding:11px 14px;
+  border-radius:8px;cursor:pointer;border:1px solid var(--line);
+  background:var(--card);color:var(--fg);
+  transition:transform .12s ease,background .2s,border-color .2s,opacity .2s;
+}
+button:hover{border-color:var(--accent)}
+button:active{transform:scale(.985)}
+button:disabled{opacity:.4;cursor:default;transform:none}
+button.primary{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+button.primary.active{background:var(--neg);border-color:var(--neg);color:#fff}
+.cancel{margin-top:10px;width:100%;color:var(--neg);background:transparent}
+.cancel[hidden]{display:none}
+.chips{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-top:20px}
+.clabel{width:100%;font-size:14px;font-weight:600;color:var(--fg);margin-bottom:2px}
+.chip{
+  flex:none;font:inherit;font-size:14px;font-weight:500;padding:7px 10px;border-radius:7px;
+  border:1px solid var(--line);background:var(--card);color:var(--muted);cursor:pointer;
+  transition:transform .12s ease,border-color .2s,color .2s;
+}
+.chip:hover{border-color:var(--accent);color:var(--fg)}
+.chip:active{transform:scale(.96)}
+.chip.trained{color:var(--fg);border-color:var(--accent)}
+.chip:disabled{opacity:.4;cursor:default}
+.status{
+  text-align:left;color:var(--muted);font-size:14px;
+  margin-top:16px;min-height:16px;transition:color .2s;
+}
+.advanced{margin-top:18px}
+.advanced summary{font-size:14px;color:var(--muted);cursor:pointer;user-select:none}
+.tune{
+  display:flex;align-items:center;gap:12px;margin-top:14px;color:var(--muted);font-size:14px;
+}
+.tune input[type=range]{
+  flex:1;-webkit-appearance:none;appearance:none;height:2px;
+  background:var(--line);border-radius:2px;outline:none;
+}
+.tune input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;
+  background:var(--accent);cursor:pointer;
+}
+.tune input[type=range]::-moz-range-thumb{
+  width:14px;height:14px;border:0;border-radius:50%;background:var(--accent);cursor:pointer;
+}
+.tune .val{font-variant-numeric:tabular-nums;min-width:30px;text-align:right}
+.people{margin-top:24px}
+.people-head{
+  color:var(--fg);font-size:15px;font-weight:600;margin-bottom:8px;
+}
+.person{
+  display:flex;align-items:center;gap:10px;min-height:54px;margin-top:4px;
+}
+.person-select{
+  flex:1;border:0;background:transparent;padding:11px 0;text-align:left;border-radius:0;
+}
+.person-select:hover{border-color:transparent}
+.person-name{display:block;font-size:15px;color:var(--fg)}
+.person-meta{display:block;margin-top:3px;font-size:14px;color:var(--muted);font-weight:400}
+.remove{
+  flex:none;border:0;background:transparent;color:var(--neg);padding:8px;
+  font-size:14px;border-radius:8px;
+}
+.remove:hover{border:0;background:color-mix(in srgb,var(--neg) 10%,transparent)}
+.people-empty{color:var(--muted);font-size:14px;padding:10px 0}
+@media (max-width:800px){
+  body{padding:16px;align-items:flex-start}
+  .app{grid-template-columns:1fr;gap:18px;max-width:560px}
+  .stage{border-radius:10px}
+  .panel{padding:20px;border-radius:10px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="stage" id="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <div class="hint" id="hint">Start camera</div>
+    <div class="guide" id="guide">
+      <div class="guide-box"></div>
+      <div class="guide-prompt" id="guidePrompt">Look straight at the camera</div>
+    </div>
+    <div class="readout" id="readout">
+      <div class="name" id="rname">unknown</div>
+      <div class="meta"><span id="remotion"></span><span class="tag" id="rtag"></span></div>
+    </div>
+  </div>
+  <div class="panel">
+  <h1 class="panel-title">Face enrollment</h1>
+  <div class="field">
+    <label for="name">Name</label>
+    <input id="name" placeholder="Enter a name" value="zakaria" autocomplete="off" spellcheck="false">
+  </div>
+  <div class="row">
+    <button id="enrollBtn" class="primary">Enroll</button>
+    <button id="recBtn">Recognize</button>
+  </div>
+  <button id="cancelBtn" class="cancel" hidden>Cancel training</button>
+  <div class="chips" id="chips">
+    <span class="clabel">Expressions</span>
+    <button class="chip" data-expr="neutral">neutral</button>
+    <button class="chip" data-expr="happy">happy</button>
+    <button class="chip" data-expr="sad">sad</button>
+    <button class="chip" data-expr="surprise">surprise</button>
+  </div>
+  <div class="status" id="status">Ready</div>
+  <details class="advanced">
+    <summary>Recognition settings</summary>
+    <div class="tune">
+      <span>Match threshold</span>
+      <input id="threshold" type="range" min="0.2" max="0.9" step="0.01" value="0.5">
+      <span class="val" id="thval">0.50</span>
+    </div>
+  </details>
+  <section class="people" aria-labelledby="peopleTitle">
+    <div class="people-head" id="peopleTitle">Saved people</div>
+    <div id="peopleList"><div class="people-empty">loading…</div></div>
+  </section>
+  </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const video=$('video'),status=$('status'),readout=$('readout'),hint=$('hint'),
+  rname=$('rname'),remotion=$('remotion'),rtag=$('rtag'),stage=$('stage'),
+  enrollBtn=$('enrollBtn'),recBtn=$('recBtn'),nameInput=$('name'),
+  threshold=$('threshold'),thval=$('thval'),peopleList=$('peopleList'),
+  guide=$('guide'),guidePrompt=$('guidePrompt'),cancelBtn=$('cancelBtn');
+const chips=Array.from(document.querySelectorAll('.chip'));
+let stream=null,timer=null,mode='idle';
+const canvas=document.createElement('canvas');
+const poses=['center','left','right','up','down'];
+const samplesPerPose=12,totalSamples=poses.length*samplesPerPose;
+
+function say(t){status.textContent=t}
+function stopLoop(){if(timer){clearInterval(timer);timer=null}mode='idle'}
+function lock(on){[enrollBtn,recBtn,...chips].forEach(b=>b.disabled=on)}
+function poseAt(count){return poses[Math.min(poses.length-1,Math.floor(count/samplesPerPose))]}
+function posePrompt(pose,expression=''){
+  const action={center:'Look straight at the camera',left:'Turn left  ←',right:'Turn right  →',up:'Look up  ↑',down:'Look down  ↓'}[pose];
+  return expression?(action+', keep a '+expression+' expression'):action;
+}
+function showGuide(on,text='',ok=false){
+  guide.classList.toggle('on',on);guide.classList.toggle('ok',ok);
+  if(text)guidePrompt.textContent=text;
+}
+function setTraining(on){cancelBtn.hidden=!on;if(!on)showGuide(false)}
+async function camera(){
+  if(stream)return;
+  stream=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480},audio:false});
+  video.srcObject=stream;await video.play();stage.classList.add('camera-on');hint.classList.add('gone');
+}
+function grab(){
+  canvas.width=video.videoWidth||640;canvas.height=video.videoHeight||480;
+  canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
+  return canvas.toDataURL('image/jpeg',0.85);
+}
+// '' when this server hosts the page; absolute when a hosted copy (Vercel) drives
+// this board through the laptop's forwarded port.
+const API="http://127.0.0.1:8000";
+async function post(url,body){
+  const r=await fetch(API+url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
+  return r.json();
+}
+async function refreshChips(){
+  const name=nameInput.value.trim();
+  let trained=[];
+  try{const m=await (await fetch(API+'/api/emotion/list')).json();trained=m[name]||[]}catch(e){}
+  chips.forEach(c=>c.classList.toggle('trained',trained.includes(c.dataset.expr)));
+}
+async function refreshPeople(){
+  let people=[];
+  try{people=await (await fetch(API+'/api/enroll/list')).json()}catch(e){}
+  peopleList.replaceChildren();
+  if(!people.length){
+    const empty=document.createElement('div');empty.className='people-empty';
+    empty.textContent='No saved people';peopleList.appendChild(empty);return;
+  }
+  people.forEach(person=>{
+    const row=document.createElement('div');row.className='person';
+    const select=document.createElement('button');select.className='person-select';
+    const label=document.createElement('span');label.className='person-name';label.textContent=person.name;
+    const meta=document.createElement('span');meta.className='person-meta';
+    meta.textContent=person.expressions.length?person.expressions.join(', '):'Face only';
+    select.append(label,meta);
+    select.onclick=()=>{nameInput.value=person.name;refreshChips();say('selected '+person.name)};
+    const remove=document.createElement('button');remove.className='remove';remove.textContent='Remove';
+    remove.setAttribute('aria-label','Remove '+person.name);
+    remove.onclick=async()=>{
+      if(!confirm('Remove '+person.name+' from the system?'))return;
+      const r=await post('/api/enroll/delete',{name:person.name});
+      if(r.status==='deleted'){
+        if(nameInput.value.trim()===person.name)nameInput.value='';
+        say('removed '+person.name);await Promise.all([refreshPeople(),refreshChips()]);
+      }
+    };
+    row.append(select,remove);peopleList.appendChild(row);
+  });
+}
+function show(o){
+  if(!o||o.name==='no_face'){readout.classList.remove('on');return}
+  readout.classList.add('on');
+  const unknown=o.name==='unknown';
+  rname.textContent=o.name;
+  rname.classList.toggle('unknown',unknown);
+  const parts=[];
+  if(o.emotion&&o.sentiment!=='not_enabled')parts.push(o.emotion);
+  if(!unknown&&o.score)parts.push(Math.round(o.score*100)+'%');
+  remotion.textContent=parts.join(', ');
+  rtag.textContent=o.emotion_source==='personal'?'personal':'';
+}
+function setRec(on){recBtn.textContent=on?'Stop':'Recognize';recBtn.classList.toggle('active',on)}
+
+stage.onclick=async()=>{try{await camera();say('camera on')}catch(e){say('camera blocked')}};
+threshold.oninput=()=>{thval.textContent=(+threshold.value).toFixed(2);post('/api/config',{threshold:+threshold.value})};
+nameInput.addEventListener('input',refreshChips);
+
+recBtn.onclick=async()=>{
+  if(mode==='recognize'){stopLoop();setRec(false);say('stopped');return}
+  try{await camera()}catch(e){say('camera blocked');return}
+  stopLoop();mode='recognize';setRec(true);
+  await post('/api/config',{threshold:+threshold.value});
+  say('recognizing');
+  timer=setInterval(async()=>{
+    if(mode!=='recognize')return;
+    try{show(await post('/api/recognize',{frame:grab()}))}catch(e){}
+  },250);
+};
+
+enrollBtn.onclick=async()=>{
+  const name=nameInput.value.trim();
+  if(!name){nameInput.focus();return}
+  try{await camera()}catch(e){say('camera blocked');return}
+  stopLoop();setRec(false);mode='enroll';readout.classList.remove('on');
+  const samples=totalSamples;let count=0;
+  await post('/api/enroll/begin',{name,samples});
+  lock(true);setTraining(true);showGuide(true,posePrompt(poseAt(0)));
+  const done=async()=>{
+    stopLoop();
+    const r=await post('/api/enroll/finish',{});
+    say(r.status==='saved'?('saved '+name):'nothing captured, try again');
+    lock(false);setTraining(false);refreshPeople();
+  };
+  timer=setInterval(async()=>{
+    if(mode!=='enroll')return;
+    const pose=poseAt(count);
+    const o=await post('/api/enroll/frame',{frame:grab(),pose});
+    if(o.status==='captured'){
+      count=o.count;showGuide(true,posePrompt(poseAt(count)),true);
+      say('Captured '+count+' / '+samples+', pose '+Math.min(poses.length,Math.floor(count/samplesPerPose)+1)+' / '+poses.length);
+    }else if(o.status==='adjust'||o.status==='no_face'){
+      showGuide(true,o.guidance||posePrompt(pose),false);say('Paused, '+(o.guidance||'adjust your pose'));
+    }
+    if(count>=samples)done();
+  },180);
+};
+
+chips.forEach(chip=>chip.onclick=async()=>{
+  const name=nameInput.value.trim();
+  if(!name){nameInput.focus();return}
+  const expr=chip.dataset.expr;
+  try{await camera()}catch(e){say('camera blocked');return}
+  stopLoop();setRec(false);mode='train';readout.classList.remove('on');
+  const samples=totalSamples;let count=0;
+  await post('/api/emotion/enroll/begin',{name,expression:expr});
+  lock(true);setTraining(true);showGuide(true,posePrompt(poseAt(0),expr));
+  const done=async()=>{
+    stopLoop();
+    const r=await post('/api/emotion/enroll/finish',{});
+    say(r.status==='saved'?('learned '+expr+' for '+name):'nothing captured, try again');
+    lock(false);setTraining(false);refreshChips();refreshPeople();
+  };
+  timer=setInterval(async()=>{
+    if(mode!=='train')return;
+    const pose=poseAt(count);
+    const o=await post('/api/emotion/enroll/frame',{frame:grab(),pose});
+    if(o.status==='captured'){
+      count=o.count;showGuide(true,posePrompt(poseAt(count),expr),true);
+      say('Captured '+count+' / '+samples+', keep the '+expr+' expression');
+    }else if(o.status==='adjust'||o.status==='no_face'){
+      showGuide(true,o.guidance||posePrompt(pose,expr),false);say('Paused, '+(o.guidance||'adjust your pose'));
+    }
+    if(count>=samples)done();
+  },160);
+});
+
+cancelBtn.onclick=async()=>{
+  stopLoop();await post('/api/enroll/cancel',{});lock(false);setTraining(false);
+  say('training cancelled');
+};
+
+refreshChips();refreshPeople();
+</script>
+</body>
+</html>

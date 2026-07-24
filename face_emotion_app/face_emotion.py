@@ -888,19 +888,22 @@ function grab(){
   canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
   return canvas.toDataURL('image/jpeg',0.85);
 }
+// '' when this server hosts the page; absolute when a hosted copy (Vercel) drives
+// this board through the laptop's forwarded port.
+const API=__API_BASE__;
 async function post(url,body){
-  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
+  const r=await fetch(API+url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
   return r.json();
 }
 async function refreshChips(){
   const name=nameInput.value.trim();
   let trained=[];
-  try{const m=await (await fetch('/api/emotion/list')).json();trained=m[name]||[]}catch(e){}
+  try{const m=await (await fetch(API+'/api/emotion/list')).json();trained=m[name]||[]}catch(e){}
   chips.forEach(c=>c.classList.toggle('trained',trained.includes(c.dataset.expr)));
 }
 async function refreshPeople(){
   let people=[];
-  try{people=await (await fetch('/api/enroll/list')).json()}catch(e){}
+  try{people=await (await fetch(API+'/api/enroll/list')).json()}catch(e){}
   peopleList.replaceChildren();
   if(!people.length){
     const empty=document.createElement('div');empty.className='people-empty';
@@ -1057,9 +1060,29 @@ def command_web(args):
 
     app = Flask(__name__)
 
+    page = HTML_PAGE.replace("__API_BASE__", '""')   # same-origin when served here
+
+    # A hosted copy of this page (Vercel) drives this board over the laptop's
+    # forwarded port. That is cross-origin AND public->private, so it needs CORS
+    # plus the Private Network Access opt-in, including on the preflight.
+    @app.after_request
+    def allow_hosted_ui(response):
+        origin = request.headers.get("Origin")
+        if origin and origin.endswith(".vercel.app"):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Vary"] = "Origin"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            response.headers["Access-Control-Allow-Private-Network"] = "true"
+        return response
+
+    @app.route("/api/<path:_rest>", methods=["OPTIONS"])
+    def preflight(_rest):
+        return ("", 204)
+
     @app.get("/")
     def index():
-        return HTML_PAGE
+        return page
 
     @app.post("/api/config")
     def api_config():

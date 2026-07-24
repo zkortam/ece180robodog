@@ -28,17 +28,31 @@ from voice_agent.web import PAGE        # noqa: E402
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--api", default="http://127.0.0.1:8100",
-                    help="where the board is reachable from the browser")
-    ap.add_argument("--out", default=str(ROOT.parent / "public" / "index.html"))
+                    help="where the voice agent is reachable from the browser")
+    ap.add_argument("--enroll-api", default="http://127.0.0.1:8000",
+                    help="where the enrollment server is reachable from the browser")
+    ap.add_argument("--out-dir", default=str(ROOT.parent / "public"))
     args = ap.parse_args()
 
-    page = (PAGE.replace("__ENDPOINT_MS__", str(config.VAD_ENDPOINT_MS))
-                .replace("__API_BASE__", json.dumps(args.api.rstrip("/"))))
+    out_dir = Path(args.out_dir)
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(page)
-    print(f"wrote {out}  (api base: {args.api})")
+    voice = (PAGE.replace("__ENDPOINT_MS__", str(config.VAD_ENDPOINT_MS))
+                 .replace("__API_BASE__", json.dumps(args.api.rstrip("/"))))
+    write(out_dir / "index.html", voice, args.api)
+
+    # Enrollment is a separate service on its own port, so it gets its own page.
+    # /enroll and /manage are the same page; Vercel serves a directory's
+    # index.html at the bare path.
+    from face_emotion import HTML_PAGE      # noqa: E402  (heavy import, only needed here)
+    enroll = HTML_PAGE.replace("__API_BASE__", json.dumps(args.enroll_api.rstrip("/")))
+    for name in ("enroll", "manage"):
+        write(out_dir / name / "index.html", enroll, args.enroll_api)
+
+
+def write(path, text, api):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    print(f"wrote {path}  (api base: {api})")
 
 
 if __name__ == "__main__":
