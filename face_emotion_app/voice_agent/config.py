@@ -110,6 +110,11 @@ HISTORY_MAX_MESSAGES = int(_env("VOICE_HISTORY_MAX", "20"))
 # feel noticeably more responsive while still leaving room for a normal short
 # breath; deployments in noisy rooms can override this with VOICE_ENDPOINT_MS.
 VAD_ENDPOINT_MS = int(_env("VOICE_ENDPOINT_MS", "300"))
+# STT and TTS both default to one thread per core. That is right on an idle box
+# and actively harmful when anything else is busy: the pools oversubscribe, the
+# scheduler thrashes, and a short utterance that costs 1.5s at four threads costs
+# over 4s at eight. Half the cores is close to optimal loaded and costs little idle.
+CPU_THREADS = int(_env("VOICE_CPU_THREADS", str(max(2, min(4, (os.cpu_count() or 4) // 2)))))
 # How long a request may wait for the in-flight turn before it is told the agent
 # is busy. Turns are half-duplex, so waiting is correct; waiting forever behind a
 # wedged turn is not -- that leaves the UI stuck in "Thinking…" with no way out.

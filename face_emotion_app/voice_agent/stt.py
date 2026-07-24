@@ -41,7 +41,8 @@ class STT:
             return
         if self.backend == "faster-whisper":
             from faster_whisper import WhisperModel
-            self._impl = WhisperModel(self.model_name, device="cpu", compute_type="int8")
+            self._impl = WhisperModel(self.model_name, device="cpu", compute_type="int8",
+                                      cpu_threads=config.CPU_THREADS)
         elif self.backend == "moonshine":
             import moonshine_onnx  # pip install useful-moonshine-onnx
             # Keep the ONNX sessions resident. Passing a model-name string to

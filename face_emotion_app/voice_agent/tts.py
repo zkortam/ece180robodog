@@ -6,6 +6,7 @@ fallback: say (macOS built-in) / espeak-ng (robotic, always-works)
 
 If the chosen backend fails, it degrades gracefully so a turn always speaks."""
 import io
+import os
 import re
 import select
 import shutil
@@ -29,6 +30,42 @@ _ABBREVIATIONS = {
     "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc",
     "e.g", "i.e", "a.m", "p.m",
 }
+
+
+# Kokoro synthesizes at roughly 1x real time, so time-to-first-word tracks the
+# length of the FIRST chunk, not the reply. A long opening sentence therefore
+# stalls playback for seconds. Breaking just the opener at a clause boundary
+# starts the voice quickly; later chunks synthesize while it plays.
+# ~55 characters is roughly 3 seconds of speech, which is about what Kokoro can
+# synthesize in the time the previous chunk plays. Lower starts the voice sooner
+# but risks a gap mid-reply; higher delays the first word.
+LEAD_CHUNK_MAX = int(os.environ.get("VOICE_LEAD_CHUNK_MAX", "55"))
+
+
+# Punctuation is the cleanest breath point, but plenty of opening sentences have
+# none. A coordinating conjunction is the next most natural place for a speaker to
+# pause, and the conjunction stays with the clause it introduces.
+_LEAD_CONJUNCTION = re.compile(
+    r"\s+(?:and|but|so|because|which|while|when|then|though|although|however)\s+")
+
+
+def _split_lead(part, limit=LEAD_CHUNK_MAX, min_head=22):
+    """Break an over-long opening sentence at its last natural boundary before
+    ``limit``. Words are never altered, only where the breath falls."""
+    if len(part) <= limit:
+        return [part]
+    cut = -1
+    for match in re.finditer(r"[,;:]\s+", part):
+        if min_head <= match.end() <= limit:
+            cut = match.end()
+    if cut < 0:
+        for match in _LEAD_CONJUNCTION.finditer(part):
+            if min_head <= match.start() <= limit:
+                cut = match.start()
+    if cut < 0:
+        return [part]
+    head, tail = part[:cut].strip(), part[cut:].strip()
+    return [head, tail] if head and tail else [part]
 
 
 def sentence_chunks(text, max_chunks=5):
@@ -56,6 +93,8 @@ def sentence_chunks(text, max_chunks=5):
     if len(parts) > 1 and len(parts[0]) < 18:
         parts[1] = parts[0] + " " + parts[1]
         parts.pop(0)
+    if parts:
+        parts = _split_lead(parts[0]) + parts[1:]
     if len(parts) > max_chunks:
         parts = parts[:max_chunks - 1] + [" ".join(parts[max_chunks - 1:])]
     return parts or [text]
@@ -78,6 +117,7 @@ class TTS:
         self.backend = backend or config.TTS_BACKEND
         self._kkeng = None      # cached Kokoro engine (name must NOT collide with _kokoro())
         self._piper_proc = None
+        self._piper_voice = None      # cached in-process PiperVoice (board TTS)
         self._piper_dir = None
         self._piper_lock = threading.Lock()
         self._piper_stderr = deque(maxlen=12)
@@ -108,7 +148,25 @@ class TTS:
             from kokoro_onnx import Kokoro
             if not Path(config.KOKORO_MODEL).exists():
                 raise TTSUnavailable(f"Kokoro model missing: {config.KOKORO_MODEL}")
-            self._kkeng = Kokoro(config.KOKORO_MODEL, config.KOKORO_VOICES)
+            # kokoro-onnx builds its InferenceSession internally with no way to pass
+            # SessionOptions, so cap the thread pool by intercepting the constructor
+            # for the length of this call only. See config.CPU_THREADS for why.
+            import onnxruntime as ort
+            original = ort.InferenceSession
+
+            def bounded(model_path, *args, **kwargs):
+                options = ort.SessionOptions()
+                options.intra_op_num_threads = config.CPU_THREADS
+                options.inter_op_num_threads = 1
+                kwargs.pop("sess_options", None)
+                return original(model_path, sess_options=options,
+                                providers=kwargs.pop("providers", None) or ["CPUExecutionProvider"])
+
+            ort.InferenceSession = bounded
+            try:
+                self._kkeng = Kokoro(config.KOKORO_MODEL, config.KOKORO_VOICES)
+            finally:
+                ort.InferenceSession = original
         return self._kkeng
 
     def _kokoro(self, text):
@@ -118,6 +176,38 @@ class TTS:
 
     # ---- Piper: neural, light (board) ----
     def _piper(self, text):
+        """Prefer the in-process voice; fall back to the CLI for older installs.
+
+        The piper-tts package exposes PiperVoice directly, which keeps the 63 MB
+        model resident. Shelling out to the CLI reloads it on every utterance:
+        measured on the UNO Q that is ~13 s per reply versus ~1.8 s in process.
+        The CLI path below also targets pre-1.6 flag names (--output_dir), which
+        the current release renamed, so the module path is the supported one now.
+        """
+        clean = " ".join((text or "").replace("\x00", " ").splitlines()).strip()
+        if not clean:
+            return b""
+        try:
+            voice = self._piper_voice_engine()
+        except Exception:
+            return self._piper_cli(text)
+        import io as _io
+        import wave as _wave
+        with self._piper_lock:
+            buf = _io.BytesIO()
+            with _wave.open(buf, "wb") as w:
+                voice.synthesize_wav(clean, w)
+            return buf.getvalue()
+
+    def _piper_voice_engine(self):
+        if getattr(self, "_piper_voice", None) is None:
+            from piper import PiperVoice
+            if not Path(config.PIPER_VOICE).exists():
+                raise TTSUnavailable(f"Piper voice not found: {config.PIPER_VOICE}")
+            self._piper_voice = PiperVoice.load(config.PIPER_VOICE)
+        return self._piper_voice
+
+    def _piper_cli(self, text):
         # Piper's voice is a 61 MB ONNX model and took ~2.2 s to load on the UNO Q.
         # Keep one CLI process alive: it accepts one utterance per stdin line and
         # prints the completed WAV path on stdout. Startup warming in main.py then

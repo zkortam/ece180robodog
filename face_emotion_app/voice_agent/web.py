@@ -31,113 +31,131 @@ PAGE = """<!doctype html>
 <title>Aware</title>
 <style>
 :root{
- --bg:#090b10;--bg-glow:#151c2a;--skin:#f3c94f;--skin-hi:#ffe786;--ink:#17140b;
- --accent:#72d8ff;--active:#62edbd;--think:#b89cff;--speak:#ffc85c;--danger:#ff766e;
- --muted:#8c94a4;--text:#e7ebf2;--voice-glow:0px;--voice-scale:0;
+ --canvas:#08080c;
+ --skin:#f3c94f;--skin-hi:#ffe786;--ink:#17140b;
+
+ --text:#fff;--text-2:rgba(255,255,255,.60);--text-3:rgba(255,255,255,.45);--text-4:rgba(255,255,255,.34);
+
+ --glass:rgba(255,255,255,.05);--glass-2:rgba(255,255,255,.08);
+ --glass-border:rgba(255,255,255,.08);--glass-border-2:rgba(255,255,255,.13);
+ --glass-shadow:0 8px 32px rgba(0,0,0,.5);
+
+ --calm:#8ab4f8;--warm:#f5c26b;--danger:#f08b84;
+
+ --r-sm:12px;--r-md:16px;--r-lg:20px;--r-xl:24px;--r-2xl:28px;--r-full:9999px;
+ --blur-glass:16px;--blur-hero:80px;
+ --ease:cubic-bezier(.4,0,.2,1);
+
+ --voice-glow:0px;--voice-scale:0;--accent:var(--calm);
 }
-*{box-sizing:border-box}html,body{height:100%}
-body{margin:0;background:
- radial-gradient(circle at 50% 42%,color-mix(in srgb,var(--bg-glow) 75%,transparent) 0,transparent 44%),
- radial-gradient(circle at 50% 120%,#162031 0,transparent 48%),var(--bg);
- color:var(--text);display:flex;flex-direction:column;align-items:center;justify-content:center;
- min-height:100%;cursor:pointer;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",Inter,system-ui,sans-serif}
-body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.15;
- background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.14'/%3E%3C/svg%3E")}
-.brand{position:fixed;top:clamp(22px,4vh,42px);left:50%;transform:translateX(-50%);font-size:13px;
- font-weight:500;color:#727b8e}
-.presence{position:relative;width:min(62vw,62vh);height:min(62vw,62vh);display:grid;place-items:center;
- isolation:isolate;transition:filter .7s ease,opacity .5s ease,transform .7s cubic-bezier(.16,1,.3,1)}
-.presence:before,.presence:after{content:"";position:absolute;inset:5%;border-radius:50%;pointer-events:none}
-.presence:before{border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);opacity:.38;
- box-shadow:0 0 50px color-mix(in srgb,var(--accent) 7%,transparent),inset 0 0 45px color-mix(in srgb,var(--accent) 4%,transparent);
- transform:scale(.94);transition:all .65s cubic-bezier(.2,.7,.2,1)}
-.presence:after{opacity:0;background:conic-gradient(from 0deg,transparent 0 55%,var(--think) 72%,transparent 87%);
- -webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 0);mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 0)}
-#face{position:relative;z-index:2;width:74%;height:74%;overflow:visible;
- filter:drop-shadow(0 24px 34px rgba(0,0,0,.34));transition:opacity .5s,filter .5s,transform .5s}
-#face.off{filter:grayscale(.5) drop-shadow(0 18px 30px rgba(0,0,0,.25));opacity:.56}
-body[data-state="listening"] .presence:before{border-color:color-mix(in srgb,var(--accent) 45%,transparent);
- box-shadow:0 0 calc(45px + var(--voice-glow)) color-mix(in srgb,var(--accent) 18%,transparent),
- inset 0 0 50px color-mix(in srgb,var(--accent) 7%,transparent);animation:listenPulse 3.2s ease-in-out infinite}
-body[data-state="recording"] .presence:before{border-color:color-mix(in srgb,var(--active) 75%,transparent);
- transform:scale(calc(.96 + var(--voice-scale)));box-shadow:0 0 calc(52px + var(--voice-glow)) color-mix(in srgb,var(--active) 24%,transparent)}
-body[data-state="thinking"] .presence:before{border-color:color-mix(in srgb,var(--think) 25%,transparent);transform:scale(.9)}
-body[data-state="thinking"] .presence:after{opacity:.9;animation:orbit 1.7s linear infinite}
-body[data-state="speaking"] .presence:before{border-color:color-mix(in srgb,var(--speak) 50%,transparent);
- transform:scale(calc(.95 + var(--voice-scale)));box-shadow:0 0 calc(50px + var(--voice-glow)) color-mix(in srgb,var(--speak) 18%,transparent)}
-body[data-looking="true"] .presence{filter:drop-shadow(0 0 28px rgba(98,237,189,.22))}
-body[data-looking="true"] .presence:after{opacity:.55;background:conic-gradient(from 0deg,transparent 0 68%,var(--active) 78%,transparent 89%);animation:orbit 3.5s linear infinite}
-body[data-vision="true"] .presence{filter:blur(9px);opacity:.16;transform:scale(.82)}
-body[data-vision="true"] .readout{transform:translateY(12px);opacity:.42}
-@keyframes listenPulse{0%,100%{transform:scale(.94);opacity:.42}50%{transform:scale(1);opacity:.85}}
-@keyframes orbit{to{transform:rotate(360deg)}}
-.skin{fill:url(#skinGradient);transition:filter .45s}
-#face.looking .skin{filter:hue-rotate(65deg) saturate(.82)}
-.face-shade{fill:none;stroke:rgba(255,255,255,.2);stroke-width:1}
-.eye{fill:var(--ink);transform-box:fill-box;transform-origin:center;animation:blink 5.4s infinite}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--canvas);color:var(--text);
+ display:flex;flex-direction:column;align-items:center;justify-content:center;gap:clamp(28px,5vh,52px);
+ min-height:100%;cursor:pointer;overflow:hidden;
+ font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",Inter,system-ui,sans-serif;
+ -webkit-font-smoothing:antialiased}
+
+/* One soft ambient wash. It shifts hue with state instead of adding chrome. */
+body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+ background:radial-gradient(circle at 50% 40%,color-mix(in srgb,var(--accent) 12%,transparent) 0,transparent 62%);
+ filter:blur(var(--blur-hero));opacity:.55;transition:opacity 1.2s var(--ease),background 1.2s var(--ease)}
+
+/* ---------- face ---------- */
+.presence{position:relative;z-index:1;display:grid;place-items:center;
+ width:min(46vw,46vh);height:min(46vw,46vh);
+ transition:transform .8s var(--ease),opacity .6s var(--ease),filter .6s var(--ease)}
+/* A single halo that breathes with the voice level. No rings, no orbits, no spinners. */
+.presence:before{content:"";position:absolute;inset:-14%;border-radius:50%;pointer-events:none;
+ background:radial-gradient(circle,color-mix(in srgb,var(--accent) 22%,transparent) 0,transparent 68%);
+ opacity:.30;transform:scale(calc(1 + var(--voice-scale)));
+ filter:blur(calc(26px + var(--voice-glow) * .35));
+ transition:opacity .7s var(--ease),transform .35s var(--ease),background .9s var(--ease)}
+body[data-state="idle"] .presence:before{opacity:.14}
+body[data-state="listening"] .presence:before{opacity:.34}
+body[data-state="recording"] .presence:before{opacity:.52}
+body[data-state="thinking"] .presence:before{opacity:.30}
+body[data-state="speaking"] .presence:before{opacity:.46}
+
+body[data-state="listening"]{--accent:var(--calm)}
+body[data-state="recording"]{--accent:var(--calm)}
+body[data-state="thinking"]{--accent:#b6a7f0}
+body[data-state="speaking"]{--accent:var(--warm)}
+
+#face{position:relative;z-index:2;width:100%;height:100%;overflow:visible;
+ filter:drop-shadow(0 18px 40px rgba(0,0,0,.45));
+ transition:opacity .6s var(--ease),filter .6s var(--ease),transform .8s var(--ease)}
+#face.off{opacity:.62;filter:saturate(.55) drop-shadow(0 14px 32px rgba(0,0,0,.35))}
+.skin{fill:url(#skinGradient)}
+.eye{fill:var(--ink);transform-box:fill-box;transform-origin:center;animation:blink 6.5s var(--ease) infinite}
+@keyframes blink{0%,96%,100%{transform:scaleY(1)}98%{transform:scaleY(.1)}}
 #smile{fill:none;stroke:var(--ink);stroke-width:9;stroke-linecap:round}
 #mouth{fill:var(--ink)}
-body[data-state="thinking"] #face{animation:thinkBreath 1.7s ease-in-out infinite}
-@keyframes thinkBreath{0%,100%{transform:scale(.985)}50%{transform:scale(1.015)}}
-@keyframes blink{0%,95%,100%{transform:scaleY(1)}97.5%{transform:scaleY(.08)}}
-.readout{display:flex;flex-direction:column;align-items:center;gap:12px;min-height:92px;width:min(84vw,620px);z-index:2;
- transition:opacity .55s ease,transform .65s cubic-bezier(.2,.8,.2,1)}
-#mode{display:inline-flex;align-items:center;gap:9px;color:var(--muted);font-size:13px;font-weight:500;
- transition:color .35s}
-#modeDot{width:6px;height:6px;border-radius:50%;background:currentColor;box-shadow:0 0 0 0 currentColor;transition:color .35s}
-body[data-state="listening"] #mode{color:var(--accent)}body[data-state="recording"] #mode{color:var(--active)}
-body[data-state="thinking"] #mode{color:var(--think)}body[data-state="speaking"] #mode{color:var(--speak)}
-body[data-state="listening"] #modeDot,body[data-state="recording"] #modeDot{animation:dotPulse 1.6s ease-out infinite}
-@keyframes dotPulse{70%,100%{box-shadow:0 0 0 9px transparent}}
-#status{font:450 clamp(14px,1.8vh,17px)/1.55 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;
- color:var(--muted);text-align:center;max-width:100%;min-height:3em;letter-spacing:.005em;
- white-space:pre-wrap;transition:color .3s;cursor:default}
-#status.err{color:var(--danger);font-weight:600}#status b{color:var(--text);font-weight:620}
-.hint{position:fixed;bottom:clamp(20px,3.5vh,38px);font-size:11px;color:#596171;letter-spacing:.035em;opacity:0;transition:opacity .4s}
-body[data-state="idle"] .hint{opacity:1}
-.vision-lens{position:fixed;z-index:8;left:50%;top:50%;width:min(78vw,560px);transform:translate(-50%,-46%) scale(.92);
- opacity:0;visibility:hidden;pointer-events:none;transition:opacity .38s ease,transform .65s cubic-bezier(.16,1,.3,1),visibility 0s linear .65s}
+/* Thinking: one slow, shallow breath. Calm, not a loading spinner. */
+body[data-state="thinking"] #face{animation:breathe 3.4s var(--ease) infinite}
+@keyframes breathe{0%,100%{transform:scale(.99)}50%{transform:scale(1.01)}}
+body[data-vision="true"] .presence{transform:scale(.9);opacity:.12;filter:blur(6px)}
+
+/* ---------- readout ---------- */
+.readout{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:10px;
+ width:min(86vw,560px);text-align:center;
+ transition:opacity .6s var(--ease),transform .6s var(--ease)}
+body[data-vision="true"] .readout{opacity:.30;transform:translateY(8px)}
+#mode{font-size:13px;font-weight:500;color:var(--text-4);transition:color .5s var(--ease)}
+body[data-state="listening"] #mode,body[data-state="recording"] #mode,
+body[data-state="thinking"] #mode,body[data-state="speaking"] #mode{color:var(--text-3)}
+#status{font-size:clamp(15px,1.9vh,17px);line-height:1.6;font-weight:400;color:var(--text-2);
+ min-height:3.2em;white-space:pre-wrap;cursor:default;transition:color .4s var(--ease)}
+#status b{color:var(--text);font-weight:550}
+#status.err{color:var(--danger)}
+
+/* ---------- camera ---------- */
+.vision-lens{position:fixed;z-index:8;left:50%;top:50%;width:min(82vw,520px);
+ transform:translate(-50%,-50%) scale(.97);opacity:0;visibility:hidden;pointer-events:none;
+ background:var(--glass);border:1px solid var(--glass-border);border-radius:var(--r-2xl);
+ backdrop-filter:blur(var(--blur-glass)) saturate(1.3);-webkit-backdrop-filter:blur(var(--blur-glass)) saturate(1.3);
+ box-shadow:var(--glass-shadow);padding:14px;
+ transition:opacity .5s var(--ease),transform .6s var(--ease),visibility 0s linear .6s}
 body[data-vision="true"] .vision-lens{opacity:1;visibility:visible;transform:translate(-50%,-50%) scale(1);transition-delay:0s}
-.vision-head{display:flex;align-items:flex-end;justify-content:space-between;margin:0 3px 13px}
-.vision-kicker{color:var(--active);font-size:12px;font-weight:500}
-#visionTitle{margin-top:5px;color:var(--text);font-size:clamp(17px,2.5vw,22px);font-weight:570;letter-spacing:-.025em}
-.vision-live{display:flex;align-items:center;gap:7px;color:#788294;font-size:12px;font-weight:500}
-.vision-live:before{content:"";width:5px;height:5px;border-radius:50%;background:var(--active);box-shadow:0 0 10px rgba(98,237,189,.75);animation:livePulse 1.4s ease-in-out infinite}
-@keyframes livePulse{50%{opacity:.35}}
-.vision-frame{position:relative;aspect-ratio:4/3;overflow:hidden;border-radius:clamp(18px,3vw,28px);background:#11151d;
- border:1px solid rgba(255,255,255,.11);box-shadow:0 30px 90px rgba(0,0,0,.52),0 0 0 1px rgba(0,0,0,.35)}
-#cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);filter:saturate(.72) contrast(1.06) brightness(.8)}
-.vision-frame:before{content:"";position:absolute;z-index:2;inset:0;pointer-events:none;background:
- linear-gradient(to bottom,rgba(7,10,15,.06),transparent 56%,rgba(7,10,15,.54)),
- radial-gradient(circle at center,transparent 48%,rgba(5,7,11,.28));box-shadow:inset 0 0 55px rgba(0,0,0,.22)}
-.scan-line{position:absolute;z-index:3;left:0;right:0;top:0;height:1px;opacity:.55;
- background:linear-gradient(90deg,transparent,var(--active),transparent);box-shadow:0 0 14px rgba(98,237,189,.5);animation:scan 2.6s ease-in-out infinite}
-@keyframes scan{0%{transform:translateY(-2px);opacity:0}12%{opacity:.6}88%{opacity:.6}100%{transform:translateY(calc(min(78vw,560px)*.75));opacity:0}}
-#visionMarks{position:absolute;z-index:4;inset:0}
-.track{position:absolute;border:1px solid rgba(98,237,189,.78);border-radius:12px;min-width:38px;min-height:38px;
- box-shadow:0 0 0 1px rgba(0,0,0,.12),inset 0 0 22px rgba(98,237,189,.04);transition:left .35s,top .35s,width .35s,height .35s}
-.track:before,.track:after{content:"";position:absolute;width:11px;height:11px;border-color:var(--active)}
-.track:before{left:-2px;top:-2px;border-left:2px solid;border-top:2px solid;border-radius:4px 0 0}
-.track:after{right:-2px;bottom:-2px;border-right:2px solid;border-bottom:2px solid;border-radius:0 0 4px}
-.track-label{position:absolute;left:-1px;bottom:-31px;display:flex;align-items:center;gap:8px;white-space:nowrap;
- color:#f2f5f7;font-size:11px;font-weight:620;text-shadow:0 1px 5px rgba(0,0,0,.8)}
-.track-label em{font-style:normal;color:#a7b0bd;font-weight:500}
-.vision-empty{position:absolute;z-index:4;left:50%;top:50%;transform:translate(-50%,-50%);color:#8b95a3;
- font-size:13px;font-weight:500;opacity:0;transition:opacity .3s}
+.vision-frame{position:relative;aspect-ratio:4/3;overflow:hidden;border-radius:var(--r-lg);background:#101014;
+ border:1px solid var(--glass-border)}
+#cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);
+ filter:saturate(.85) brightness(.86)}
+#visionMarks{position:absolute;inset:0}
+.track{position:absolute;border:1.5px solid rgba(255,255,255,.55);border-radius:var(--r-sm);
+ min-width:34px;min-height:34px;box-shadow:0 2px 12px rgba(0,0,0,.28);
+ transition:left .45s var(--ease),top .45s var(--ease),width .45s var(--ease),height .45s var(--ease)}
+.track-label{position:absolute;left:0;bottom:-32px;display:inline-flex;align-items:baseline;gap:7px;
+ white-space:nowrap;padding:4px 10px;border-radius:var(--r-full);
+ background:rgba(10,10,14,.62);border:1px solid var(--glass-border-2);
+ backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+ color:var(--text);font-size:12px;font-weight:500}
+.track-label em{font-style:normal;color:var(--text-3);font-weight:400}
+.vision-empty{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+ color:var(--text-4);font-size:13px;font-weight:400;opacity:0;transition:opacity .4s var(--ease)}
 .vision-empty.show{opacity:1}
-.vision-foot{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:13px 3px 0;color:#747e8e;font-size:11px}
-#visionSummary{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vision-private{flex:none;color:#5d6674}
-@media (max-width:600px){.vision-lens{width:min(90vw,520px)}.vision-private{display:none}.vision-frame{border-radius:20px}}
-@media (max-height:620px){.brand{top:16px}.presence{width:min(55vw,55vh);height:min(55vw,55vh)}.readout{gap:8px;min-height:70px}.hint{display:none}.vision-lens{width:min(62vw,440px)}.vision-head{margin-bottom:8px}.vision-foot{margin-top:8px}}
-@media (prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
+.vision-foot{display:flex;align-items:baseline;gap:10px;padding:12px 4px 2px}
+#visionTitle{color:var(--text);font-size:14px;font-weight:500;letter-spacing:-.01em}
+#visionSummary{color:var(--text-4);font-size:13px;font-weight:400;
+ white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+@media (max-height:620px){
+ .presence{width:min(38vw,38vh);height:min(38vw,38vh)}
+ .vision-lens{width:min(64vw,420px)}
+ #status{min-height:2.6em}
+}
+@media (prefers-reduced-motion:reduce){
+ *,*:before,*:after{animation-duration:.001ms!important;animation-iteration-count:1!important;
+  transition-duration:.001ms!important}
+}
 </style></head>
-<body data-state="idle" data-looking="false">
- <div class="brand">Aware</div>
+<body data-state="idle" data-looking="false" data-vision="false">
  <div class="presence" aria-hidden="true">
   <svg id="face" class="face off" viewBox="0 0 200 200">
-   <defs><radialGradient id="skinGradient" cx="38%" cy="28%" r="78%"><stop offset="0" stop-color="var(--skin-hi)"/><stop offset=".58" stop-color="var(--skin)"/><stop offset="1" stop-color="#dcae2e"/></radialGradient></defs>
+   <defs><radialGradient id="skinGradient" cx="38%" cy="28%" r="78%">
+    <stop offset="0" stop-color="var(--skin-hi)"/><stop offset=".58" stop-color="var(--skin)"/>
+    <stop offset="1" stop-color="#dcae2e"/></radialGradient></defs>
    <circle class="skin" cx="100" cy="100" r="94"/>
-   <circle class="face-shade" cx="100" cy="100" r="92.5"/>
    <circle class="eye" cx="70" cy="84" r="10"/>
    <circle class="eye" cx="130" cy="84" r="10"/>
    <path id="smile" d="M62 122 Q100 156 138 122"/>
@@ -145,20 +163,16 @@ body[data-vision="true"] .vision-lens{opacity:1;visibility:visible;transform:tra
   </svg>
  </div>
  <div class="readout" aria-live="polite">
-  <div id="mode"><span id="modeDot"></span><span id="modeText">Standby</span></div>
+  <div id="mode"><span id="modeText">Standby</span></div>
   <div id="status">Click the face to begin</div>
  </div>
- <div class="hint">Click the face anytime to pause</div>
  <section id="visionLens" class="vision-lens" aria-hidden="true">
-  <div class="vision-head">
-   <div><div class="vision-kicker">Camera</div><div id="visionTitle">Looking</div></div>
-   <div class="vision-live">Local</div>
-  </div>
   <div class="vision-frame">
    <video id="cam" autoplay playsinline muted></video>
-   <div class="scan-line"></div><div id="visionMarks"></div><div id="visionEmpty" class="vision-empty">Seeking a face</div>
+   <div id="visionMarks"></div>
+   <div id="visionEmpty" class="vision-empty">No face in view</div>
   </div>
-  <div class="vision-foot"><span id="visionSummary">Checking identity and expression</span><span class="vision-private">On-device vision</span></div>
+  <div class="vision-foot"><span id="visionTitle">Looking</span><span id="visionSummary"></span></div>
  </section>
  <canvas id="vcanvas" style="display:none"></canvas>
 <script>
@@ -174,8 +188,13 @@ let calibrated=false,calibVals=[],noiseFloor=0.01;
 let convState='idle',pcmNode=null,silentGain=null,pcmChunks=[],pcmPreroll=[],segStart=0,curSrc=null;
 let streamSources=new Set(),streamDone=false,playbackEnd=0,streamAbort=null;
 let voicedMs=0,silenceMs=0,speechMs=0,hasSpeech=false,pending=null;
-let visionOpen=false,visionKind='',visionBusy=false;
+let visionOpen=false,visionKind='',visionBusy=false,turnUsedCamera=false;
+let outLevel=0,speakStart=0;   // live playback level + when speaking began, for barge-in
 const ENDPOINT_MS=__ENDPOINT_MS__,MIN_SPEECH_MS=240,MAX_UTTER_MS=15000,LISTEN_RESET_MS=8000;
+// Barge-in must survive the speaker-to-mic path. Without a grace window, a hold
+// long enough to exclude a syllable of echo, and a threshold that rises with the
+// current playback level, the reply interrupts ITSELF and is never heard.
+const BARGE_GRACE_MS=900,BARGE_HOLD_MS=650,BARGE_BLEED=0.85;
 
 const MODE_LABEL={idle:'Standby',listening:'Listening',recording:'Hearing you',thinking:'Thinking',speaking:'Speaking'};
 function face(cls){
@@ -217,12 +236,12 @@ function renderVision(scene){
    mark.style.width=(b[2]*100/fw)+'%';mark.style.height=(b[3]*100/fh)+'%';label.className='track-label';
    const name=p.name&&p.name!=='unknown'?p.name:'Unrecognized';
    const emotion=p.emotion&&p.sentiment!=='not_enabled'?p.emotion:'';
-   label.innerHTML='<span>'+esc(name)+'</span><em>'+(emotion?esc(emotion)+' · '+pct(p.emotion_score):pct(p.identity_score))+'</em>';
+   label.innerHTML='<span>'+esc(name)+'</span><em>'+(emotion?esc(emotion)+', '+pct(p.emotion_score):pct(p.identity_score))+'</em>';
    mark.appendChild(label);visionMarks.appendChild(mark);
  }
  if(visionKind!=='enroll'){
    visionTitle.textContent=people.length?'Recognizing '+people.length+(people.length===1?' person':' people'):'Checking the scene';
-   visionSummary.textContent=people.length?people.map(p=>(p.name&&p.name!=='unknown'?p.name:'Unknown')+(p.emotion?' · '+p.emotion:'')).join('   '):'No face currently detected';
+   visionSummary.textContent=people.length?people.map(p=>(p.name&&p.name!=='unknown'?p.name:'Unknown')+(p.emotion?', '+p.emotion:'')).join('   '):'No face currently detected';
  }
 }
 async function refreshVision(){
@@ -272,11 +291,17 @@ function energy(){analyser.getFloatTimeDomainData(dataArr);let s=0;for(let i=0;i
 function beginListen(){
  // A queued restart must not silently undo a pause the user asked for.
  if(!handsFree||!started){convState='idle';face('');return}
+ hideVision();   // a new turn starts clean; last turn's camera panel closes here
  convState='listening';face('listening');say('Listening');
  hasSpeech=false;voicedMs=0;silenceMs=0;speechMs=0;segStart=performance.now();pending=null;
  pcmChunks=[];pcmPreroll=[];
 }
-function endpoint(){if(convState!=='recording')return;convState='thinking';face('thinking');say('Thinking…');showVision('analysis');sendUtterance()}
+// The camera panel is evidence of looking, not decoration: it opens only after
+// the model actually calls a tool that reads the camera. Opening it on every turn
+// put a face-scanning overlay on "what time is it".
+const CAMERA_TOOLS=new Set(['who_is_in_view','describe_scene','get_person_emotion','enroll_face','train_emotion','start_watching']);
+function usedCamera(trace){return Array.isArray(trace)&&trace.some(t=>CAMERA_TOOLS.has(t&&t.tool))}
+function endpoint(){if(convState!=='recording')return;turnUsedCamera=false;convState='thinking';face('thinking');say('Thinking…');sendUtterance()}
 function restartSeg(){beginListen()}
 
 function vadLoop(){
@@ -298,7 +323,11 @@ function vadLoop(){
    if(!hasSpeech&&now-segStart>LISTEN_RESET_MS)restartSeg();
    if(hasSpeech&&now-segStart>MAX_UTTER_MS)endpoint();
  }else if(convState==='speaking'&&handsFree){
-   if(e>barge){voicedMs+=dt;if(voicedMs>=300)bargeIn()}else voicedMs=Math.max(0,voicedMs-dt);
+   // Speaker bleed rises and falls with the reply, so the bar to interrupt rises
+   // with it. Decay faster than it accumulates so echo can never creep to the hold.
+   const thresh=Math.max(barge,noiseFloor*9,outLevel*BARGE_BLEED);
+   if(now-speakStart>BARGE_GRACE_MS&&e>thresh){voicedMs+=dt;if(voicedMs>=BARGE_HOLD_MS)bargeIn()}
+   else voicedMs=Math.max(0,voicedMs-dt*1.5);
  }
  requestAnimationFrame(vadLoop);
 }
@@ -349,12 +378,12 @@ async function sendLegacy(blob){
  // A non-JSON body means the server threw before our handler (HTML 500, proxy 502).
  // Reporting that as a network error would be a lie -- the server answered.
  try{j=await r.json()}
- catch(e){fatal('Server error '+r.status+' — check the terminal running the agent.');return}
+ catch(e){fatal('Server error '+r.status+'. Check the terminal running the agent.');return}
  // 503 = the server is misconfigured (bad/missing key, token budget). Every turn
  // fails identically, so stop and show it rather than looping silently forever.
  if(r.status===503){fatal((j.error||'Server not configured.').split('\\n')[0]);return}
  if(j.error){hideVision();say('<b>Heard:</b> '+esc(j.transcript||'(you)')+'\\n'+esc(j.error),true);setTimeout(beginListen,2600);return}
- if(!j.transcript){hideVision();say("Didn't catch that — say it again.");setTimeout(beginListen,900);return}
+ if(!j.transcript){hideVision();say("Didn't catch that. Say it again.");setTimeout(beginListen,900);return}
  if(j.audio_b64){say('<b>You:</b> '+esc(j.transcript)+'\\n<b>Me:</b> '+esc(j.reply));play(j.audio_b64)}
  else{hideVision();say('<b>You:</b> '+esc(j.transcript)+'\\n<b>Me:</b> '+esc(j.reply||'(no reply)')+'\\n(no voice audio)');setTimeout(beginListen,1800)}
 }
@@ -374,7 +403,8 @@ async function sendStream(blob){
     if(!line.trim())continue;let ev;try{ev=JSON.parse(line)}catch(e){throw new Error('invalid stream data')}
     if(ev.type==='meta'){
       gotMeta=true;transcript=ev.transcript||'';
-      if(!transcript){hideVision();say("Didn't catch that — say it again.");continue}
+      if(usedCamera(ev.tools)){turnUsedCamera=true;showVision('analysis')}
+      if(!transcript){hideVision();say("Didn't catch that. Say it again.");continue}
       say('<b>You:</b> '+esc(transcript)+'\\n<b>Me:</b> '+esc(ev.reply||''));
     }else if(ev.type==='audio'&&ev.audio_b64){
       gotAudio=true;await queueStreamAudio(ev.audio_b64);
@@ -403,19 +433,21 @@ async function queueStreamAudio(b64){
  const by=Uint8Array.from(atob(b64),c=>c.charCodeAt(0));
  let buf;try{buf=await audioCtx.decodeAudioData(by.buffer)}catch(e){throw new Error('Reply audio would not decode')}
  if(!handsFree)return;
- if(convState!=='speaking'){hideVision();convState='speaking';face('speaking');speakingMouth(true);voicedMs=0}
+ // On a camera turn the panel stays up through the reply, so you can see what it
+// saw while it tells you. Otherwise it was never opened and this is a no-op.
+ if(convState!=='speaking'){if(!turnUsedCamera)hideVision();convState='speaking';face('speaking');speakingMouth(true);voicedMs=0;speakStart=performance.now()}
  const src=audioCtx.createBufferSource();src.buffer=buf;
  const an=audioCtx.createAnalyser();an.fftSize=512;const md=new Float32Array(an.fftSize);
  src.connect(an);an.connect(audioCtx.destination);streamSources.add(src);
  const when=Math.max(audioCtx.currentTime+.025,playbackEnd);playbackEnd=when+buf.duration;
  src.onended=()=>{streamSources.delete(src);finishStreamIfReady()};src.start(when);
- (function ml(){if(!streamSources.has(src))return;an.getFloatTimeDomainData(md);let s=0;for(let i=0;i<md.length;i++){const v=md[i];s+=v*v}const level=Math.min(1,Math.sqrt(s/md.length)*9);setMouth(level);document.documentElement.style.setProperty('--voice-glow',(level*70).toFixed(1)+'px');document.documentElement.style.setProperty('--voice-scale',(level*.04).toFixed(3));requestAnimationFrame(ml)})();
+ (function ml(){if(!streamSources.has(src))return;an.getFloatTimeDomainData(md);let s=0;for(let i=0;i<md.length;i++){const v=md[i];s+=v*v}const level=Math.min(1,Math.sqrt(s/md.length)*9);outLevel=level;setMouth(level);document.documentElement.style.setProperty('--voice-glow',(level*70).toFixed(1)+'px');document.documentElement.style.setProperty('--voice-scale',(level*.04).toFixed(3));requestAnimationFrame(ml)})();
 }
 function finishStreamIfReady(){if(streamDone&&streamSources.size===0){speakingMouth(false);afterSpeak()}}
 async function play(b64){
  hideVision();
  if(!handsFree){convState='idle';face('');return}   // paused during 'thinking' -> stay silent
- convState='speaking';face('speaking');speakingMouth(true);voicedMs=0;
+ convState='speaking';face('speaking');speakingMouth(true);voicedMs=0;speakStart=performance.now();
  let buf;try{const by=Uint8Array.from(atob(b64),c=>c.charCodeAt(0));buf=await audioCtx.decodeAudioData(by.buffer)}
  catch(e){speakingMouth(false);say('Reply came back but the audio would not play.',true);setTimeout(afterSpeak,1800);return}
  const src=audioCtx.createBufferSource();src.buffer=buf;
@@ -423,7 +455,7 @@ async function play(b64){
  src.connect(an);an.connect(audioCtx.destination);curSrc=src;
  src.onended=()=>{if(curSrc===src)curSrc=null;speakingMouth(false);afterSpeak()};
  src.start();
- (function ml(){if(curSrc!==src)return;an.getFloatTimeDomainData(md);let s=0;for(let i=0;i<md.length;i++){const v=md[i];s+=v*v}const level=Math.min(1,Math.sqrt(s/md.length)*9);setMouth(level);document.documentElement.style.setProperty('--voice-glow',(level*70).toFixed(1)+'px');document.documentElement.style.setProperty('--voice-scale',(level*.04).toFixed(3));requestAnimationFrame(ml)})();
+ (function ml(){if(curSrc!==src)return;an.getFloatTimeDomainData(md);let s=0;for(let i=0;i<md.length;i++){const v=md[i];s+=v*v}const level=Math.min(1,Math.sqrt(s/md.length)*9);outLevel=level;setMouth(level);document.documentElement.style.setProperty('--voice-glow',(level*70).toFixed(1)+'px');document.documentElement.style.setProperty('--voice-scale',(level*.04).toFixed(3));requestAnimationFrame(ml)})();
 }
 function afterSpeak(){if(handsFree)beginListen();else{convState='idle';face('')}}
 function stopAllAudio(){
@@ -450,7 +482,7 @@ async function startCam(){
  // Camera denial must be visible: silently swallowing it leaves every vision tool
  // answering "no one is in view", and enroll then blames the user's lighting.
  try{vstream=await navigator.mediaDevices.getUserMedia({video:{width:320,height:240}});cam.srcObject=vstream;await cam.play();camOk=true}
- catch(e){camOk=false;say('Camera blocked — I can hear you but not see you. Allow camera access and reload.',true);return}
+ catch(e){camOk=false;say('Camera blocked. I can hear you but not see you. Allow camera access, then reload.',true);return}
 setInterval(()=>{
   // Paused means paused: a user who clicked the face to stop the agent must not
   // keep streaming their camera to the server. Enrollment is the one exception --
@@ -469,7 +501,7 @@ setInterval(()=>{
    fetch('/api/vision/frame',{method:'POST',body:fd}).catch(()=>{}).finally(()=>{frameBusy=false})},'image/jpeg',0.7)},500);
 }
 
-function togglePause(){handsFree=!handsFree;if(handsFree){beginListen()}else{if(streamAbort){streamAbort.abort();streamAbort=null}streamDone=true;stopAllAudio();hideVision();pcmChunks=[];pcmPreroll=[];convState='idle';face('');say('Paused — click the face to resume.')}}
+function togglePause(){handsFree=!handsFree;if(handsFree){beginListen()}else{if(streamAbort){streamAbort.abort();streamAbort=null}streamDone=true;stopAllAudio();hideVision();pcmChunks=[];pcmPreroll=[];convState='idle';face('');say('Paused. Click the face to resume.')}}
 faceEl.addEventListener('click',e=>{e.stopPropagation();if(!started)startAll();else togglePause()});
 document.body.addEventListener('click',()=>{if(!started)startAll()});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&started&&(convState==='listening'||convState==='recording'))restartSeg()});
