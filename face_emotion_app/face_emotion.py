@@ -148,7 +148,14 @@ def face_embedding(recognizer, frame, face):
 # Scope it to this project instead. Vercel preview deployments are
 # "<project>-<hash>-<team>.vercel.app", so the project prefix admits our own
 # previews while excluding everyone else's.
-VERCEL_PROJECT = os.environ.get("VOICE_VERCEL_PROJECT", "ece180")
+#
+# This MUST be the deployed HOSTNAME, which is not necessarily the Vercel project
+# name: .vercel/project.json here says "ece180" while the site actually serves
+# from ece180robodog.vercel.app. Taking the name from project.json silently
+# blocked the live page from reaching the board -- the deployment answered 200 and
+# every API call it made failed CORS. If you rename the deployment, change this
+# (or set VOICE_VERCEL_PROJECT) or the hosted UI goes dead again.
+VERCEL_PROJECT = os.environ.get("VOICE_VERCEL_PROJECT", "ece180robodog")
 
 
 def is_allowed_ui_origin(origin: str | None, extra=()) -> bool:

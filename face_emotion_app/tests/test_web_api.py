@@ -271,8 +271,8 @@ def test_an_oversized_upload_is_refused_before_it_is_read(client):
 # ------------------------------------------------------------------ CORS scope
 
 def test_our_hosted_ui_may_drive_the_board(client):
-    response = client.get("/api/health", headers={"Origin": "https://ece180.vercel.app"})
-    assert response.headers.get("Access-Control-Allow-Origin") == "https://ece180.vercel.app"
+    response = client.get("/api/health", headers={"Origin": "https://ece180robodog.vercel.app"})
+    assert response.headers.get("Access-Control-Allow-Origin") == "https://ece180robodog.vercel.app"
     assert response.headers.get("Access-Control-Allow-Private-Network") == "true"
 
 
@@ -293,7 +293,7 @@ def test_preflight_succeeds_and_carries_the_cors_grant(client):
     opt-in attached. Flask answers OPTIONS for a route that has other methods with
     its own 200, so the status is not fixed at 204."""
     response = client.options("/api/voice/turn",
-                              headers={"Origin": "https://ece180.vercel.app"})
+                              headers={"Origin": "https://ece180robodog.vercel.app"})
     assert 200 <= response.status_code < 300
     assert response.headers.get("Access-Control-Allow-Private-Network") == "true"
 

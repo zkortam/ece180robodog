@@ -118,20 +118,30 @@ def test_file_mtime_ns_is_zero_for_absent_and_none(tmp_path):
 # --------------------------------------------------------------- CORS scoping
 
 @pytest.mark.parametrize("origin", [
-    "https://ece180.vercel.app",
-    "https://ece180-git-main-team.vercel.app",
-    "https://ece180-abc123.vercel.app",
+    # The LIVE production host. Regression: this was set from the Vercel project
+    # name in .vercel/project.json ("ece180"), but the site actually serves from
+    # ece180robodog.vercel.app -- which does not start with "ece180-", so the
+    # deployed page was blocked from reaching the board on every API call.
+    "https://ece180robodog.vercel.app",
+    "https://ece180robodog-git-main-team.vercel.app",
+    "https://ece180robodog-abc123.vercel.app",
 ])
 def test_our_own_vercel_deployments_are_allowed(origin):
     assert fe.is_allowed_ui_origin(origin)
 
 
+def test_the_default_matches_the_host_that_is_actually_deployed():
+    """A guard against the config drifting away from reality again: the default
+    must admit the production hostname with no environment override at all."""
+    assert fe.is_allowed_ui_origin("https://ece180robodog.vercel.app")
+
+
 @pytest.mark.parametrize("origin", [
     "https://someone-else.vercel.app",
-    "https://ece180.attacker.com",
+    "https://ece180robodog.attacker.com",
     "https://evil.com",
-    "https://ece180.vercel.app.attacker.com",
-    "https://notece180.vercel.app",
+    "https://ece180robodog.vercel.app.attacker.com",
+    "https://notece180robodog.vercel.app",
     None,
     "",
 ])
@@ -150,7 +160,7 @@ def test_explicitly_configured_origins_are_allowed():
 
 
 def test_origin_matching_ignores_port_and_case():
-    assert fe.is_allowed_ui_origin("https://ECE180.vercel.app:443")
+    assert fe.is_allowed_ui_origin("https://ECE180ROBODOG.vercel.app:443")
 
 
 # ------------------------------------------------------------ label handling
