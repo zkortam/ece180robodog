@@ -47,12 +47,30 @@ def create_recognizer(model_path: Path):
     return cv2.FaceRecognizerSF_create(str(model_path), "")
 
 
-def open_camera(camera: int, width: int, height: int):
+def open_camera(camera: int, width: int, height: int, fps: int | None = None):
     cap = cv2.VideoCapture(camera)
     if not cap.isOpened():
         raise SystemExit(f"could not open camera index {camera}")
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    if fps:
+        # Ask the CAMERA to slow down rather than capturing 30 fps and throwing
+        # most of it away. Two reasons, both specific to a robot where the webcam,
+        # microphone and speaker share one USB hub:
+        #
+        #  * Staleness. V4L2 queues frames in the driver. Reading at 4 fps from a
+        #    camera producing 30 means read() hands back a queued frame from up to
+        #    a few hundred ms ago -- the robot answers about a scene that has
+        #    already moved on, and identity tracking associates against a stale
+        #    position.
+        #  * Bandwidth. Those discarded frames still cross the shared bus and cost
+        #    the same USB budget the audio stream needs. Starving `arecord` is what
+        #    produces "microphone stopped returning audio".
+        cap.set(cv2.CAP_PROP_FPS, fps)
+    # Keep the queue shallow so whatever the camera does deliver is the newest
+    # frame available. Not honoured by every V4L2 driver, hence the FPS request
+    # above rather than relying on this alone; harmless where it is ignored.
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return cap
 
 
@@ -119,6 +137,43 @@ def face_embedding(recognizer, frame, face):
     return feature / norm, aligned
 
 
+# Origins allowed to drive this board from a page hosted elsewhere.
+#
+# This used to be `origin.endswith(".vercel.app")`, which matches EVERY Vercel
+# deployment on the internet, not just ours -- and it is paired with
+# Access-Control-Allow-Private-Network, so any page any user happened to visit on
+# any *.vercel.app subdomain could reach the board on localhost, read the camera,
+# and enroll or delete faces. Neither service has authentication.
+#
+# Scope it to this project instead. Vercel preview deployments are
+# "<project>-<hash>-<team>.vercel.app", so the project prefix admits our own
+# previews while excluding everyone else's.
+VERCEL_PROJECT = os.environ.get("VOICE_VERCEL_PROJECT", "ece180")
+
+
+def is_allowed_ui_origin(origin: str | None, extra=()) -> bool:
+    """True when `origin` may call this board's API cross-origin."""
+    if not origin:
+        return False
+    if origin in extra:
+        return True
+    host = origin.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    if not host.endswith(".vercel.app"):
+        return False
+    label = host[: -len(".vercel.app")]
+    project = VERCEL_PROJECT.lower()
+    # exact production host, or one of our own preview hosts
+    return bool(project) and (label == project or label.startswith(project + "-"))
+
+
+def file_mtime_ns(path: Path | None) -> int:
+    """Modification time in ns, or 0 when the file is absent."""
+    try:
+        return path.stat().st_mtime_ns if path else 0
+    except OSError:
+        return 0
+
+
 def load_db(path: Path):
     if not path.exists():
         return {}
@@ -178,6 +233,52 @@ def save_emotion_db(path: Path, db) -> None:
         person: {expr: np.asarray(vec, dtype=np.float32).tolist() for expr, vec in exprs.items()}
         for person, exprs in db.items()
     })
+
+
+class EnrollmentStore:
+    """Shared access to the identity and expression databases on disk.
+
+    TWO processes own these files at once on the board: the voice agent
+    (VisionService) and the enrollment server (FaceEngine). Both persist the WHOLE
+    dictionary in a single write, so whichever one is holding a stale in-memory
+    copy erases the other's people -- enroll someone by voice, then save or delete
+    anyone in the manage UI, and the voice-enrolled person is gone.
+
+    The rule that prevents it is: re-read before every read AND immediately before
+    every write, which shrinks the lost-update window from "the entire uptime of
+    the process" to microseconds. It lives here, once, because both sides had
+    their own copy of it and a subtle correctness invariant maintained in two
+    places is one that will eventually only be true in one of them.
+
+    Users must define db_path, emotion_db_path, db, emotion_db, and call
+    _stamp_dbs() once during __init__. All methods assume the caller holds the
+    instance lock.
+    """
+
+    def _stamp_dbs(self):
+        self._db_mtime = file_mtime_ns(self.db_path)
+        self._emotion_db_mtime = file_mtime_ns(self.emotion_db_path)
+
+    def _refresh_dbs(self):
+        """Reload either database if another process rewrote it."""
+        db_mtime = file_mtime_ns(self.db_path)
+        if db_mtime != self._db_mtime:
+            self.db = load_db(self.db_path)
+            self._db_mtime = db_mtime
+        if self.emotion_db_path:
+            emotion_mtime = file_mtime_ns(self.emotion_db_path)
+            if emotion_mtime != self._emotion_db_mtime:
+                self.emotion_db = load_emotion_db(self.emotion_db_path)
+                self._emotion_db_mtime = emotion_mtime
+
+    def _save_dbs(self, identities=False, expressions=False):
+        """Persist and re-stamp, so our own write is never read back as someone else's."""
+        if identities:
+            save_db(self.db_path, self.db)
+            self._db_mtime = file_mtime_ns(self.db_path)
+        if expressions and self.emotion_db_path:
+            save_emotion_db(self.emotion_db_path, self.emotion_db)
+            self._emotion_db_mtime = file_mtime_ns(self.emotion_db_path)
 
 
 def classify_personal(protos, feat, temperature=0.2):
@@ -295,7 +396,7 @@ def landmarks_bbox(landmarks):
     return x0, y0, x1 - x0, y1 - y0
 
 
-class FaceEngine:
+class FaceEngine(EnrollmentStore):
     def __init__(self, detector_path: Path, recognizer_path: Path, db_path: Path, width: int, height: int, threshold: float, emotion_model: str | None = None, emotion_size: int = 224, emotion_every: int = 8, emotion_labels=None, emotion_db_path: Path | None = None):
         self.detector_path = detector_path
         self.recognizer_path = recognizer_path
@@ -312,6 +413,7 @@ class FaceEngine:
         self.enroll_delay = 0.15
         self.last_enroll_capture = 0.0
         self.last_emotion = (None, 0.0)
+        self.last_emotion_name = None      # whose expression last_emotion describes
         self.emotion_every = emotion_every
         self.emotion_counter = 0
         self.emotion = None
@@ -319,6 +421,7 @@ class FaceEngine:
             self.emotion = EmotionModel(Path(emotion_model), emotion_size, emotion_labels or DEFAULT_LABELS)
         self.emotion_db_path = emotion_db_path
         self.emotion_db = load_emotion_db(emotion_db_path) if emotion_db_path else {}
+        self._stamp_dbs()
         self.last_emotion_source = "generic"
         self.emo_enroll_name = None
         self.emo_enroll_expr = None
@@ -331,10 +434,12 @@ class FaceEngine:
 
     def emotion_status(self):
         with self.lock:
+            self._refresh_dbs()
             return {person: sorted(exprs.keys()) for person, exprs in self.emotion_db.items()}
 
     def list_people(self):
         with self.lock:
+            self._refresh_dbs()
             names = sorted(set(self.db) | set(self.emotion_db), key=str.casefold)
             return [
                 {
@@ -347,14 +452,13 @@ class FaceEngine:
 
     def remove_person(self, name: str):
         with self.lock:
+            self._refresh_dbs()      # delete from the CURRENT roster, not a stale copy
             existed = name in self.db or name in self.emotion_db
             if not existed:
                 return {"status": "not_found", "name": name}
             self.db.pop(name, None)
             self.emotion_db.pop(name, None)
-            save_db(self.db_path, self.db)
-            if self.emotion_db_path:
-                save_emotion_db(self.emotion_db_path, self.emotion_db)
+            self._save_dbs(identities=True, expressions=True)
             if self.enroll_name == name:
                 self.enroll_name = None
                 self.enroll_embeddings = []
@@ -401,11 +505,11 @@ class FaceEngine:
                 self.emo_enroll_name = None
                 self.emo_enroll_expr = None
                 return {"status": "empty"}
+            self._refresh_dbs()      # merge onto the newest roster, do not overwrite it
             mean_feat = np.mean(np.stack(self.emo_enroll_feats), axis=0)
             person = self.emotion_db.setdefault(self.emo_enroll_name, {})
             person[self.emo_enroll_expr] = mean_feat
-            if self.emotion_db_path:
-                save_emotion_db(self.emotion_db_path, self.emotion_db)
+            self._save_dbs(expressions=True)
             result = {"status": "saved", "name": self.emo_enroll_name, "expression": self.emo_enroll_expr, "samples": len(self.emo_enroll_feats)}
             self.emo_enroll_name = None
             self.emo_enroll_expr = None
@@ -456,10 +560,11 @@ class FaceEngine:
             if not self.enroll_embeddings:
                 self.enroll_name = None
                 return {"status": "empty"}
+            self._refresh_dbs()      # merge onto the newest roster, do not overwrite it
             mean_embedding = np.mean(np.stack(self.enroll_embeddings), axis=0)
             mean_embedding = mean_embedding / np.linalg.norm(mean_embedding)
             self.db[self.enroll_name] = mean_embedding
-            save_db(self.db_path, self.db)
+            self._save_dbs(identities=True)
             result = {"status": "saved", "name": self.enroll_name, "samples": len(self.enroll_embeddings)}
             self.enroll_name = None
             self.enroll_embeddings = []
@@ -467,6 +572,7 @@ class FaceEngine:
 
     def recognize_frame(self, frame):
         with self.lock:
+            self._refresh_dbs()      # a face enrolled by voice must be recognized here too
             faces = detect_faces(self.detector, frame)
             face = largest_face(faces)
             if face is None:
@@ -477,6 +583,18 @@ class FaceEngine:
                 emotion_label, emotion_score = self.last_emotion
                 return {"name": "unknown", "score": 0.0, "emotion": emotion_label, "emotion_score": emotion_score, "sentiment": sentiment_from_emotion(emotion_label), "emotion_source": self.last_emotion_source if self.emotion else "none"}
             name, score = best_match(self.db, embedding, self.threshold)
+            # Expression is cached between inferences (they only run every
+            # emotion_every frames), and there is exactly ONE cache slot because
+            # this path only ever looks at the largest face. So when the largest
+            # face becomes a DIFFERENT person, the cached value is the previous
+            # person's expression -- and it gets reported as the new person's until
+            # the next inference lands. Reading someone else's mood off your face is
+            # not a rounding error. VisionService already resets on identity change
+            # (see _set_track_identity); this path had never been given the same fix.
+            if name != self.last_emotion_name:
+                self.last_emotion_name = name
+                self.last_emotion = (None, 0.0)
+                self.last_emotion_source = "generic"
             if self.emotion and self.emotion_every > 0 and self.emotion_counter % self.emotion_every == 0:
                 probs = self.emotion.probabilities(frame, face)
                 if probs is not None:
@@ -1059,6 +1177,11 @@ def command_web(args):
     )
 
     app = Flask(__name__)
+    # A data-URL frame from a 640x480 camera is well under a megabyte. Cap the body
+    # so a malformed or hostile POST cannot be read entirely into the board's RAM.
+    app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("ENROLL_MAX_UPLOAD_BYTES",
+                                                          str(8 * 1024 * 1024)))
+    _extra_origins = tuple(o for o in os.environ.get("VOICE_ALLOWED_ORIGINS", "").split(",") if o)
 
     page = HTML_PAGE.replace("__API_BASE__", '""')   # same-origin when served here
 
@@ -1068,7 +1191,7 @@ def command_web(args):
     @app.after_request
     def allow_hosted_ui(response):
         origin = request.headers.get("Origin")
-        if origin and origin.endswith(".vercel.app"):
+        if is_allowed_ui_origin(origin, extra=_extra_origins):
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Vary"] = "Origin"
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
@@ -1084,28 +1207,76 @@ def command_web(args):
     def index():
         return page
 
+    class BadRequest(Exception):
+        """A client sent something unusable. Answers 400, never a 500 stack trace."""
+
+    def body():
+        """The request body as a dict, or a clean 400.
+
+        get_json(force=True) raises on a malformed body and every handler then
+        indexed the result directly, so a truncated upload or a stray GET turned
+        into an HTML 500 with a traceback -- unreadable to the page, and noise in
+        the board's log during exactly the moments something is already wrong."""
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise BadRequest("expected a JSON object")
+        return data
+
+    def required(data, key):
+        value = str(data.get(key, "")).strip()
+        if not value:
+            raise BadRequest(f"'{key}' is required")
+        return value
+
+    def frame_from(data):
+        try:
+            return decode_data_url(required(data, "frame"))
+        except BadRequest:
+            raise
+        except (ValueError, TypeError, base64.binascii.Error) as exc:
+            raise BadRequest(f"could not decode frame: {exc}") from exc
+
+    @app.errorhandler(BadRequest)
+    def on_bad_request(exc):
+        return jsonify({"status": "invalid", "error": str(exc)}), 400
+
+    @app.errorhandler(413)
+    def on_too_large(_exc):
+        return jsonify({"status": "invalid", "error": "request body too large"}), 413
+
     @app.post("/api/config")
     def api_config():
-        data = request.get_json(force=True)
+        data = body()
         if "threshold" in data:
-            engine.set_threshold(float(data["threshold"]))
-        if "emotion_model" in data and data["emotion_model"]:
-            emotion_path = Path(data["emotion_model"])
-            emotion_size = DEFAULT_EMOTION_SIZE if emotion_path == DEFAULT_EMOTION_MODEL else args.emotion_size
-            engine.emotion = EmotionModel(emotion_path, emotion_size, args.emotion_labels.split())
+            try:
+                engine.set_threshold(float(data["threshold"]))
+            except (TypeError, ValueError) as exc:
+                raise BadRequest("threshold must be a number") from exc
+        # Loading an arbitrary path as an ONNX model is a filesystem read chosen by
+        # the caller. Only the model this build ships with is accepted.
+        requested = str(data.get("emotion_model") or "").strip()
+        if requested:
+            if Path(requested).resolve() != DEFAULT_EMOTION_MODEL.resolve():
+                raise BadRequest("emotion_model must be the bundled model")
+            engine.emotion = EmotionModel(DEFAULT_EMOTION_MODEL, DEFAULT_EMOTION_SIZE,
+                                          args.emotion_labels.split())
         return jsonify({"ok": True, "threshold": engine.threshold})
 
     @app.post("/api/enroll/begin")
     def api_enroll_begin():
-        data = request.get_json(force=True)
-        engine.enroll_begin(str(data["name"]).strip(), float(data.get("delay", 0.15)))
-        return jsonify({"ok": True, "name": data["name"]})
+        data = body()
+        name = required(data, "name")
+        try:
+            delay = float(data.get("delay", 0.15))
+        except (TypeError, ValueError) as exc:
+            raise BadRequest("delay must be a number") from exc
+        engine.enroll_begin(name, delay)
+        return jsonify({"ok": True, "name": name})
 
     @app.post("/api/enroll/frame")
     def api_enroll_frame():
-        data = request.get_json(force=True)
-        frame = decode_data_url(data["frame"])
-        return jsonify(engine.enroll_frame(frame, str(data.get("pose", "center"))))
+        data = body()
+        return jsonify(engine.enroll_frame(frame_from(data), str(data.get("pose", "center"))))
 
     @app.post("/api/enroll/finish")
     def api_enroll_finish():
@@ -1121,17 +1292,11 @@ def command_web(args):
 
     @app.post("/api/enroll/delete")
     def api_enroll_delete():
-        data = request.get_json(force=True)
-        name = str(data.get("name", "")).strip()
-        if not name:
-            return jsonify({"status": "invalid", "error": "name is required"}), 400
-        return jsonify(engine.remove_person(name))
+        return jsonify(engine.remove_person(required(body(), "name")))
 
     @app.post("/api/recognize")
     def api_recognize():
-        data = request.get_json(force=True)
-        frame = decode_data_url(data["frame"])
-        return jsonify(engine.recognize_frame(frame))
+        return jsonify(engine.recognize_frame(frame_from(body())))
 
     @app.get("/api/emotion/list")
     def api_emotion_list():
@@ -1139,15 +1304,15 @@ def command_web(args):
 
     @app.post("/api/emotion/enroll/begin")
     def api_emotion_begin():
-        data = request.get_json(force=True)
-        engine.emotion_enroll_begin(str(data["name"]).strip(), str(data["expression"]).strip())
+        data = body()
+        engine.emotion_enroll_begin(required(data, "name"), required(data, "expression"))
         return jsonify({"ok": True})
 
     @app.post("/api/emotion/enroll/frame")
     def api_emotion_frame():
-        data = request.get_json(force=True)
-        frame = decode_data_url(data["frame"])
-        return jsonify(engine.emotion_enroll_frame(frame, str(data.get("pose", "center"))))
+        data = body()
+        return jsonify(engine.emotion_enroll_frame(frame_from(data),
+                                                   str(data.get("pose", "center"))))
 
     @app.post("/api/emotion/enroll/finish")
     def api_emotion_finish():

@@ -31,7 +31,9 @@ VISION_CAMERA = int(_env("VOICE_CAMERA", "0"))
 VISION_WIDTH = int(_env("VOICE_CAM_W", "320"))
 VISION_HEIGHT = int(_env("VOICE_CAM_H", "240"))
 VISION_FPS = int(_env("VOICE_FPS", "4"))
-VISION_EMOTION_EVERY = int(_env("VOICE_EMOTION_EVERY", "8"))
+# Seconds between expression inferences per tracked face. Raise it on the board if
+# the cores are needed for STT/TTS; identity tracking is unaffected either way.
+VISION_EMOTION_INTERVAL = float(_env("VOICE_EMOTION_INTERVAL", "1.5"))
 # Favor "unknown" over a wrong name. Track-level hysteresis preserves a confirmed
 # identity through brief weak frames, so this can be conservative without flicker.
 VISION_THRESHOLD = float(_env("VOICE_THRESHOLD", "0.58"))
@@ -46,9 +48,19 @@ STT_BACKEND = _env("VOICE_STT", "faster-whisper" if _IS_MAC else "moonshine")
 # --stt (e.g. --stt moonshine on a Mac asked Moonshine for "moonshine/small.en",
 # which does not exist). Resolve per backend, and let the env var still win.
 _STT_DEFAULT_MODELS = {
-    # small.en is far more accurate than tiny.en and still fast on Apple Silicon CPU
-    "faster-whisper": "small.en",
-    "whisper": "small.en",
+    # base.en, NOT small.en. Measured on this project's own phrases (M-series CPU,
+    # int8, beam_size=1, vad_filter on), 6 utterances including the name "Zakaria":
+    #
+    #     small.en   22.02 s total   (2.4-6.1 s per utterance)
+    #     base.en     4.47 s total   (0.6-1.0 s per utterance)   IDENTICAL text
+    #
+    # small.en was the single largest component of turn latency -- bigger than the
+    # LLM call and the speech synthesis combined -- and bought nothing on this
+    # vocabulary. tiny.en is faster still but starts mangling words ("a 1 sentence"
+    # for "a one sentence"), and a misheard name is worse than a slower reply.
+    # Override with VOICE_STT_MODEL if a harder accent or a noisier room needs it.
+    "faster-whisper": "base.en",
+    "whisper": "base.en",
     "moonshine": "tiny",
 }
 
@@ -117,6 +129,8 @@ VAD_ENDPOINT_MS = int(_env("VOICE_ENDPOINT_MS", "250"))
 # Origins allowed to drive this board from a page hosted elsewhere. *.vercel.app
 # is accepted implicitly; add explicit origins (e.g. a custom domain) here.
 ALLOWED_UI_ORIGINS = tuple(o for o in _env("VOICE_ALLOWED_ORIGINS", "").split(",") if o)
+# Largest request body the board will read. See create_app().
+MAX_UPLOAD_BYTES = int(_env("VOICE_MAX_UPLOAD_BYTES", str(8 * 1024 * 1024)))
 
 CPU_THREADS = int(_env("VOICE_CPU_THREADS", str(max(2, min(4, (os.cpu_count() or 4) // 2)))))
 # How long a request may wait for the in-flight turn before it is told the agent

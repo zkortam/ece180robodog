@@ -17,15 +17,32 @@ class NoSpeech(Exception):
 # cough or a door slam, and an unguarded hallucination makes the agent answer a
 # question nobody asked. vad_filter catches this on faster-whisper; this net
 # catches the same artifacts on backends that have no VAD (moonshine, on the board).
-# Deliberately narrow: only strings that are never a real standalone command.
-# "thank you" / "bye" are NOT listed -- a user says those, and swallowing them
-# would be worse than the rare hallucination.
-_ARTIFACTS = {"you", "thanks for watching", "[blank_audio]", "[silence]"}
+#
+# THIS IS THE ONLY NOISE POLICY IN THE STACK. The orchestrator used to keep a
+# second, much wider list of its own that contradicted the rule below: it dropped
+# "okay", "yeah", "thanks", and "bye". Those are exactly the words a person says to
+# a robot, and "yeah" is the expected answer to the agent's own question during
+# registration ("want me to learn a few expressions?"), so that turn was swallowed
+# and the flow silently stalled.
+#
+# Deliberately narrow: only strings that are never a real standalone utterance.
+# Filler sounds and bare punctuation qualify. Real words do not -- swallowing a
+# real word is worse than answering a rare hallucination, because the user gets no
+# feedback at all and simply repeats themselves.
+_ARTIFACTS = {
+    "you", "thanks for watching", "thank you for watching",
+    "[blank_audio]", "[silence]", "[ silence ]", "[music]", "(silence)",
+    "uh", "um", "hmm", "mm", "mhm", "hm", "huh", "ah", "eh",
+}
 
 
-def _is_artifact(text):
-    t = text.strip().strip(" .!?,").lower()
+def is_noise_transcript(text):
+    """True when a transcript is an STT artifact rather than something a person said."""
+    t = " ".join((text or "").split()).strip().strip(" .!?,").lower()
     return not t or t in _ARTIFACTS        # bare punctuation normalises to ""
+
+
+_is_artifact = is_noise_transcript          # backwards-compatible alias
 
 
 class STT:

@@ -16,6 +16,8 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, request, stream_with_context
 
+import face_emotion as fe
+
 from . import config
 from .tts import sentence_chunks
 
@@ -127,6 +129,12 @@ body[data-vision="true"] .vision-lens{opacity:1;visibility:visible;transform:tra
  border:1px solid var(--glass-border)}
 #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);
  filter:saturate(.85) brightness(.86)}
+/* The robot's own eye, streamed from the board. Deliberately NOT mirrored: this
+   is a third-person view of what the robot sees, not a selfie preview. */
+#boardCam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+ filter:saturate(.85) brightness(.86)}
+body[data-eye="board"] #cam{display:none}
+body[data-eye="browser"] #boardCam{display:none}
 #visionMarks{position:absolute;inset:0}
 .track{position:absolute;border:1.5px solid rgba(255,255,255,.55);border-radius:var(--r-sm);
  min-width:34px;min-height:34px;box-shadow:0 2px 12px rgba(0,0,0,.28);
@@ -177,7 +185,7 @@ body[data-board="offline"] #board{color:var(--danger);border-color:color-mix(in 
   transition-duration:.001ms!important}
 }
 </style></head>
-<body data-state="idle" data-looking="false" data-vision="false">
+<body data-state="idle" data-looking="false" data-vision="false" data-eye="browser">
  <div class="presence" aria-hidden="true">
   <svg id="face" class="face off" viewBox="0 0 200 200">
    <defs><radialGradient id="skinGradient" cx="38%" cy="28%" r="78%">
@@ -198,6 +206,7 @@ body[data-board="offline"] #board{color:var(--danger);border-color:color-mix(in 
  <section id="visionLens" class="vision-lens" aria-hidden="true">
   <div class="vision-frame">
    <video id="cam" autoplay playsinline muted></video>
+   <img id="boardCam" alt="">
    <div id="visionMarks"></div>
    <div id="visionEmpty" class="vision-empty">No face in view</div>
   </div>
@@ -209,6 +218,7 @@ body[data-board="offline"] #board{color:var(--danger);border-color:color-mix(in 
 const faceEl=document.getElementById('face'),smile=document.getElementById('smile'),mouth=document.getElementById('mouth'),
  statusEl=document.getElementById('status'),modeText=document.getElementById('modeText'),
  cam=document.getElementById('cam'),vcanvas=document.getElementById('vcanvas'),
+ boardCam=document.getElementById('boardCam'),
  visionLens=document.getElementById('visionLens'),visionTitle=document.getElementById('visionTitle'),
  visionMarks=document.getElementById('visionMarks'),visionEmpty=document.getElementById('visionEmpty'),
  visionSummary=document.getElementById('visionSummary');
@@ -219,6 +229,11 @@ let convState='idle',pcmNode=null,silentGain=null,pcmChunks=[],pcmPreroll=[],seg
 let streamSources=new Set(),streamDone=false,playbackEnd=0,streamAbort=null;
 let voicedMs=0,silenceMs=0,speechMs=0,hasSpeech=false,pending=null,peakE=0;
 let visionOpen=false,visionKind='',visionBusy=false,turnUsedCamera=false;
+// 'browser' = this page supplies the camera (laptop dev). 'board' = the robot has
+// its own webcam and owns perception; we must not open a second camera or upload
+// competing frames, so the lens views the robot's eye instead. Learned from
+// /api/health before the camera is ever requested.
+let frameSource='browser';
 let outLevel=0,speakStart=0,frameTick=0;   // live playback level + when speaking began, for barge-in
 const API=__API_BASE__;
 // When this page is hosted, its own /enroll route serves the enrollment UI.
@@ -270,8 +285,11 @@ function renderVision(scene){
  visionMarks.replaceChildren();visionEmpty.classList.toggle('show',!people.length);
  for(const p of people){
    const b=p.bbox||[0,0,0,0],mark=document.createElement('div'),label=document.createElement('div');
-   // The preview is mirrored, so mirror the detector's x coordinate as well.
-   mark.className='track';mark.style.left=(100-(b[0]+b[2])*100/fw)+'%';mark.style.top=(b[1]*100/fh)+'%';
+   // The browser preview is mirrored (it is a selfie view), so the detector's x
+   // must be mirrored to match. The robot's own eye is not mirrored, so it must
+   // not be -- getting this wrong puts every box on the wrong side of the frame.
+   const left=frameSource==='board'?(b[0]*100/fw):(100-(b[0]+b[2])*100/fw);
+   mark.className='track';mark.style.left=left+'%';mark.style.top=(b[1]*100/fh)+'%';
    mark.style.width=(b[2]*100/fw)+'%';mark.style.height=(b[3]*100/fh)+'%';label.className='track-label';
    const name=p.name&&p.name!=='unknown'?p.name:'Unrecognized';
    const emotion=p.emotion&&p.sentiment!=='not_enabled'?p.emotion:'';
@@ -323,7 +341,22 @@ async function startAll(){
    }
  };
  calibrated=false;calibVals=[];noiseFloor=0.01;lastT=performance.now();
- startCam();beginListen();requestAnimationFrame(vadLoop);
+ // Settle the camera question BEFORE asking for hardware: on a standalone robot
+ // the board owns the camera, and prompting for the laptop's webcam there is both
+ // a pointless permission dialog and a second feed the board would have to reject.
+ await checkBoard();
+ if(frameSource==='board'){camOk=true;startBoardEye()}else{startCam()}
+ beginListen();requestAnimationFrame(vadLoop);
+}
+// Poll the robot's own camera into the lens. Only while the lens is open: every
+// frame costs the board a JPEG encode, and it is closed most of the time.
+let boardEyeTimer=null;
+function startBoardEye(){
+ if(boardEyeTimer)return;
+ boardEyeTimer=setInterval(()=>{
+  if(!started||!visionOpen)return;
+  boardCam.src=API+'/api/vision/snapshot.jpg?t='+Date.now();
+ },400);
 }
 let voiceSmooth=0;
 function setVoiceLevel(level){
@@ -584,6 +617,9 @@ async function checkBoard(manual){
   const r=await fetch(API+'/api/health',{signal:ctl.signal,cache:'no-store'});
   clearTimeout(t);
   if(!r.ok)throw new Error('bad status');
+  // One page serves both deployments; the board tells us which one this is.
+  try{const h=await r.json();if(h&&h.frame_source){frameSource=h.frame_source;
+   document.body.dataset.eye=frameSource==='board'?'board':'browser'}}catch(e){}
   boardFails=0;setBoard('connected');return true;
  }catch(e){
   // One missed probe during a busy turn is normal; only call it offline once a
@@ -603,6 +639,10 @@ document.addEventListener('visibilitychange',()=>{if(!document.hidden&&started&&
 
 def create_app(agent, vision_service):
     app = Flask(__name__)
+    # A 15 s utterance at 16 kHz mono is under 500 KB and a JPEG frame is ~30 KB.
+    # Cap the body so a runaway or hostile upload cannot exhaust the board's RAM;
+    # Flask answers an over-size request with 413 before reading it.
+    app.config["MAX_CONTENT_LENGTH"] = int(config.MAX_UPLOAD_BYTES)
 
     page = (PAGE.replace("__ENDPOINT_MS__", str(config.VAD_ENDPOINT_MS))
                 .replace("__API_BASE__", '""'))   # same-origin when the board serves it
@@ -615,7 +655,7 @@ def create_app(agent, vision_service):
     @app.after_request
     def allow_hosted_ui(response):
         origin = request.headers.get("Origin")
-        if origin and (origin.endswith(".vercel.app") or origin in config.ALLOWED_UI_ORIGINS):
+        if fe.is_allowed_ui_origin(origin, extra=config.ALLOWED_UI_ORIGINS):
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Vary"] = "Origin"
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
@@ -639,7 +679,12 @@ def create_app(agent, vision_service):
         if not agent.turn_lock.acquire(timeout=config.TURN_LOCK_TIMEOUT):
             raise Busy("I'm still finishing the last answer — give me a second.")
         try:
-            yield
+            # Slow perception for the duration of the turn. The browser already
+            # holds back its own frame uploads while thinking and speaking; this
+            # applies the same policy to a board that owns its camera, where
+            # nothing else would.
+            with vision_service.turn_in_progress():
+                yield
         finally:
             agent.turn_lock.release()
 
@@ -704,6 +749,10 @@ def create_app(agent, vision_service):
             return json.dumps({"type": kind, **fields}, ensure_ascii=False) + "\n"
 
         def generate():
+            # Wall clock for the WHOLE turn, started before the lock is taken so
+            # queueing counts too. This is the number the person waiting actually
+            # experiences; every per-stage timing below is a component of it.
+            t_turn = time.perf_counter()
             try:
                 with turn_slot():
                     try:
@@ -724,22 +773,34 @@ def create_app(agent, vision_service):
 
                     chunks = sentence_chunks(out.get("reply", ""))
                     t_tts = time.perf_counter()
-                    first_ms = None
+                    first_chunk_ms = None
+                    first_audio_ms = None
                     for index, text_part in enumerate(chunks):
                         wav = agent.tts.synth(text_part)
-                        if first_ms is None:
-                            first_ms = (time.perf_counter() - t_tts) * 1000
+                        if first_chunk_ms is None:
+                            # Synthesis cost of the opening chunk alone (tune with
+                            # VOICE_LEAD_CHUNK_MAX) ...
+                            first_chunk_ms = (time.perf_counter() - t_tts) * 1000
+                            # ... versus the silence the person actually sits
+                            # through: STT + thinking + that first chunk. This used
+                            # to report only the former under the name first_audio,
+                            # which made the turn look several times more
+                            # responsive than it was.
+                            first_audio_ms = (time.perf_counter() - t_turn) * 1000
                         yield event("audio", index=index, text=text_part,
                                     audio_b64=base64.b64encode(wav).decode() if wav else "")
                     tts_ms = (time.perf_counter() - t_tts) * 1000
                     timings = dict(out.get("timings_ms", {}))
                     timings.update(
                         tts=round(tts_ms, 1),
-                        first_audio=round(first_ms or 0.0, 1),
-                        total=round(timings.get("stt", 0.0) + timings.get("llm", 0.0) + tts_ms, 1),
+                        tts_first_chunk=round(first_chunk_ms or 0.0, 1),
+                        first_audio=round(first_audio_ms or 0.0, 1),
+                        total=round((time.perf_counter() - t_turn) * 1000, 1),
                     )
                     print(f"[voice] stream: stt={timings.get('stt', 0):.0f}ms "
-                          f"llm={timings.get('llm', 0):.0f}ms first_audio={first_ms or 0:.0f}ms "
+                          f"llm={timings.get('llm', 0):.0f}ms "
+                          f"first_audio={first_audio_ms or 0:.0f}ms "
+                          f"(chunk1 synth {first_chunk_ms or 0:.0f}ms) "
                           f"tts={tts_ms:.0f}ms chunks={len(chunks)}", flush=True)
                     yield event("done", timings_ms=timings, chunks=len(chunks))
             except GeneratorExit:
@@ -779,9 +840,24 @@ def create_app(agent, vision_service):
 
         Deliberately touches nothing expensive: the page polls this every couple of
         seconds to tell 'board unplugged' apart from 'board busy with a turn'.
+
+        `frame_source` is what lets one page serve both deployments. On a
+        standalone robot the board owns the camera, so the browser must NOT open
+        its own and must not upload frames -- it views the robot's eye instead.
         """
         return jsonify({"ok": True, "stt": config.STT_BACKEND, "tts": config.TTS_BACKEND,
-                        "model": config.CEREBRAS_MODEL})
+                        "model": config.CEREBRAS_MODEL,
+                        "frame_source": vision_service.frame_source(),
+                        "watching": vision_service.running})
+
+    @app.get("/api/vision/snapshot.jpg")
+    def snapshot():
+        """What the robot's own camera is looking at, for a remote viewer."""
+        jpeg = vision_service.snapshot_jpeg()
+        if jpeg is None:
+            return ("", 503)
+        return Response(jpeg, mimetype="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
 
     @app.get("/api/vision/enroll_status")
     def enroll_status():

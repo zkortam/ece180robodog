@@ -9,28 +9,10 @@ import time
 
 from . import config
 from .cerebras_client import CerebrasClient, Truncated, _status, is_auth_error, is_rate_limit
-from .stt import STT, NoSpeech
+from .stt import STT, NoSpeech, is_noise_transcript
 from .tts import TTS
 from .tool_bus import ToolBus
 from .tools import VisionTools
-
-
-# Small STT models do not return silence for non-speech: they return a short,
-# confident filler. These are the ones Moonshine and Whisper emit for room noise,
-# and none of them is a real thing to say to an assistant.
-_NOISE_TRANSCRIPTS = {
-    "you", "thank you", "thanks", "bye", "okay", "ok", "uh", "um", "hmm", "mm",
-    "yeah", "so", "the", "a", "oh", "ah", "hm", "mhm", "huh", ".", "..", "...",
-    "thank you.", "you.", "bye.", "thanks for watching!", "thank you for watching!",
-}
-
-
-def _is_noise(text):
-    """True when a transcript is almost certainly background noise, not speech."""
-    clean = " ".join((text or "").split()).strip().lower().strip(".,!?")
-    if not clean:
-        return True
-    return clean in _NOISE_TRANSCRIPTS
 
 
 class VoiceAgent:
@@ -153,10 +135,11 @@ class VoiceAgent:
             # Truncated/empty recording from the browser. Routine; not a server error.
             transcript = ""
         stt_ms = (time.perf_counter() - t_stt) * 1000
-        if _is_noise(transcript):
+        if is_noise_transcript(transcript):
             # Room chatter and door thumps still reach STT occasionally, and small
             # models emit a confident filler word for them. Answering that makes the
-            # agent look like it is talking to itself, so treat it as silence.
+            # agent look like it is talking to itself, so treat it as silence. The
+            # policy lives in stt.py so there is exactly one definition of "noise".
             transcript = ""
         if not transcript:
             return {"transcript": "", "reply": "", "tools": [],

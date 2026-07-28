@@ -1,0 +1,36 @@
+# Tooling config only -- the app is run from source, not installed as a package.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# tests/ imports the app the same way main.py does: face_emotion.py and
+# vision_service.py are top-level modules next to the voice_agent package.
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    # A thread that dies with an unhandled exception is a real defect here: it is
+    # how the camera loop once stranded the robot blind. Fail on it, never warn.
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv-voice", "models", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "C4", "SIM"]
+ignore = [
+    "E501",    # long lines are checked by the formatter's line-length, not here
+    "E741",    # `l` is fine in short numeric code
+    "SIM105",  # contextlib.suppress is not clearer than a two-line try/except here
+    # Deliberate idioms in this codebase, not oversights:
+    "E702",    # `w.setnchannels(1); w.setsampwidth(2); ...` -- WAV headers read
+               # better as one grouped line than as four separate statements
+    "SIM108",  # a ternary is not clearer than the platform if/else in config.py
+    "SIM115",  # NamedTemporaryFile(delete=False) is intentional: the file must
+               # outlive the block so a subprocess or a stream generator can use it
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately construct objects without __init__ and poke private state.
+"tests/*" = ["B011"]

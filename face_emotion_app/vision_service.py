@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -48,7 +49,73 @@ def _size_bucket(frac):
     return "small" if frac < 0.05 else "large" if frac > 0.20 else "medium"
 
 
-class VisionService:
+# ---- V4L2 capability query (VIDIOC_QUERYCAP), used to find the real camera ----
+#
+# On the UNO Q's Qualcomm SoC, /dev/video* is NOT a list of cameras: the hardware
+# video encoder and decoder claim nodes there too, and with a USB hub the webcam
+# lands at whatever index is left over. Probing each node by opening it with
+# OpenCV is both slow and unsafe -- opening a memory-to-memory encoder node can
+# block, and a block inside the camera watcher thread is unrecoverable because
+# that thread is the only thing that can ever restore vision.
+#
+# Asking the kernel directly is one ioctl, cannot hang, and needs no v4l2-ctl
+# binary (which is not installed on every image).
+_VIDIOC_QUERYCAP = 0x80685600          # _IOR('V', 0, struct v4l2_capability), 104 bytes
+_CAP_VIDEO_CAPTURE = 0x00000001
+_CAP_VIDEO_CAPTURE_MPLANE = 0x00001000
+_CAP_VIDEO_M2M = 0x00008000
+_CAP_VIDEO_M2M_MPLANE = 0x00004000
+_CAP_DEVICE_CAPS = 0x80000000
+
+
+def v4l2_capture_capability(path):
+    """(is_camera, card_name) for a /dev/video* node, via one non-blocking ioctl.
+
+    Returns (None, "") when the node cannot be queried at all, so callers can
+    decide whether to fall back to probing rather than treating "unknown" as "no".
+    """
+    import fcntl
+    import struct
+    layout = "16s32s32sII I 3I"        # driver, card, bus_info, version, caps, device_caps, reserved
+    try:
+        with open(path, "rb", buffering=0) as node:
+            buf = fcntl.ioctl(node, _VIDIOC_QUERYCAP, bytes(struct.calcsize(layout)))
+    except (OSError, ValueError):
+        return None, ""
+    driver, card, _bus, _ver, caps, device_caps = struct.unpack(layout, buf)[:6]
+    name = card.split(b"\0", 1)[0].decode(errors="replace").strip()
+    # device_caps describes THIS node; capabilities describes the whole device,
+    # which on a multi-node encoder wrongly advertises capture on every node.
+    effective = device_caps if caps & _CAP_DEVICE_CAPS else caps
+    captures = bool(effective & (_CAP_VIDEO_CAPTURE | _CAP_VIDEO_CAPTURE_MPLANE))
+    transcodes = bool(effective & (_CAP_VIDEO_M2M | _CAP_VIDEO_M2M_MPLANE))
+    del driver
+    return (captures and not transcodes), name
+
+
+def capture_device_indexes():
+    """Camera indexes worth trying, lowest first, newest-plugged last.
+
+    Nodes the kernel says are real capture devices come first; nodes that could
+    not be queried are appended as a last resort so an unusual driver still gets
+    a chance instead of the robot declaring itself blind.
+    """
+    from glob import glob
+    cameras, unknown = [], []
+    for path in sorted(glob("/dev/video*")):
+        suffix = path.rsplit("video", 1)[1]
+        if not suffix.isdigit():
+            continue
+        index = int(suffix)
+        is_camera, name = v4l2_capture_capability(path)
+        if is_camera:
+            cameras.append((index, name))
+        elif is_camera is None:
+            unknown.append((index, name))
+    return sorted(cameras) + sorted(unknown)
+
+
+class VisionService(fe.EnrollmentStore):
     def __init__(
         self,
         detector_path=fe.DEFAULT_DETECTOR,
@@ -61,7 +128,7 @@ class VisionService:
         width=320,
         height=240,
         fps=4,
-        emotion_every=8,
+        emotion_interval=1.5,
         threshold=0.5,
         ring_seconds=300,
         ring_max=600,
@@ -78,7 +145,11 @@ class VisionService:
         self.width = width
         self.height = height
         self.fps = fps
-        self.emotion_every = emotion_every
+        # Seconds between expression inferences PER TRACKED FACE. This used to be
+        # `emotion_every`, a frame count that nothing read: scheduling moved to a
+        # per-track timer in step() but the old knob stayed in the constructor, in
+        # start(), and in the reported config, so tuning it did nothing at all.
+        self.emotion_interval = emotion_interval
         self.threshold = threshold
         self.ring_seconds = ring_seconds
         self.ring_max = ring_max
@@ -93,22 +164,25 @@ class VisionService:
         if self.emotion_model_path and self.emotion_model_path.exists():
             self.emotion = fe.EmotionModel(self.emotion_model_path, emotion_size, fe.DEFAULT_LABELS)
         self.emotion_db = fe.load_emotion_db(self.emotion_db_path) if self.emotion_db_path else {}
-        self._db_mtime = self.db_path.stat().st_mtime_ns if self.db_path.exists() else 0
-        self._emotion_db_mtime = (
-            self.emotion_db_path.stat().st_mtime_ns
-            if self.emotion_db_path and self.emotion_db_path.exists() else 0
-        )
+        self._stamp_dbs()
 
         # state (guarded by lock)
         self.lock = threading.Lock()
         self.running = False
         self.external = False     # True = frames pushed in via submit_frame() (e.g. browser camera)
+        # Does this deployment have a camera of its own? Declared up front by
+        # main.py rather than inferred from `running`, because the answer must be
+        # correct BEFORE the board has finished discovering its webcam -- a browser
+        # that guesses "no" in that window opens its own camera and starts pushing
+        # a competing feed that the board then has to reject.
+        self.owns_camera = False
         self.started_at = None
         self.frames_processed = 0
         self.frame_w = width
         self.frame_h = height
         self.latest = []          # list[Observation] for the current frame
         self.latest_t = 0.0
+        self.latest_frame = None  # last BGR frame, for the snapshot endpoint
         self.people = {}          # name -> {present, first_seen, last_seen, last_obs}
         self.ring = {}            # name -> deque[ExpressionSample]
         self.events = deque(maxlen=64)  # {t, name, event, identity_score}
@@ -118,7 +192,17 @@ class VisionService:
         self._next_track = 1
         self._frame_counter = 0
         self._enroll = None       # active voice-driven enrollment job, or None
+        # Set while a conversation turn is being processed. The board has four small
+        # cores and STT, the LLM wait, and TTS all land on them at once; perception
+        # running at full rate during that window is competing with the very thing
+        # the person is waiting for. Slowed rather than paused: the feed must stay
+        # live enough that a vision tool called mid-turn still sees the present.
+        self._turn_active = threading.Event()
         self._thread = None
+        # Bumped on every start(). The camera loop clears `running` on its way out
+        # only if it is still the current generation, so a thread that dies late
+        # cannot switch off a loop that has already been restarted in its place.
+        self._generation = 0
         self._stop = threading.Event()
 
     # ---- DB bridge (called after a new enrollment / emotion-train) ----
@@ -126,11 +210,7 @@ class VisionService:
         with self.lock:
             self.db = fe.load_db(self.db_path)
             self.emotion_db = fe.load_emotion_db(self.emotion_db_path) if self.emotion_db_path else {}
-            self._db_mtime = self.db_path.stat().st_mtime_ns if self.db_path.exists() else 0
-            self._emotion_db_mtime = (
-                self.emotion_db_path.stat().st_mtime_ns
-                if self.emotion_db_path and self.emotion_db_path.exists() else 0
-            )
+            self._stamp_dbs()
         return {"identities": sorted(self.db.keys()),
                 "emotion_people": sorted(self.emotion_db.keys())}
 
@@ -169,8 +249,11 @@ class VisionService:
         return n
 
     # ---- lifecycle ----
-    def start(self, camera=None, fps=None, emotion_every=None, threshold=None, external=False):
-        """external=True: no server camera thread; frames arrive via submit_frame()."""
+    def start(self, camera=None, fps=None, emotion_interval=None, threshold=None, external=False):
+        """external=True: no server camera thread; frames arrive via submit_frame().
+
+        Every tuning argument defaults to None and means "leave it alone". Callers
+        that want the current value must not pass one."""
         with self.lock:
             if self.running:
                 return {"running": True, "already_running": True,
@@ -179,24 +262,36 @@ class VisionService:
                 self.camera = camera
             if fps is not None:
                 self.fps = fps
-            if emotion_every is not None:
-                self.emotion_every = emotion_every
+            if emotion_interval is not None:
+                self.emotion_interval = emotion_interval
             if threshold is not None:
                 self.threshold = threshold
             self._stop.clear()
             self.running = True
             self.external = external
             self.started_at = time.time()
+            self._generation += 1
+            generation = self._generation
         if not external:
-            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread = threading.Thread(target=self._loop, args=(generation,),
+                                            daemon=True)
             self._thread.start()
         return {"running": True, "already_running": False, "external": external,
                 "config": self._config(), "started_at": self.started_at}
 
     def submit_frame(self, frame):
-        """Feed one externally-captured BGR frame (browser camera path)."""
+        """Feed one externally-captured BGR frame (browser camera path).
+
+        Refused when the board is driving its own camera. Two frame sources into
+        one perception loop is not a merge, it is a fight: the tracker would see
+        the room and the laptop's webcam on alternating frames, so association
+        thrashes, identities flip, and presence flickers between two realities.
+        The robot's own eye wins -- the browser is a viewer in that mode, and
+        /api/vision/snapshot.jpg shows it what the robot is actually looking at."""
         if not self.running:
             return {"ok": False, "reason": "not watching"}
+        if not self.external:
+            return {"ok": False, "reason": "board camera is active", "frame_source": "board"}
         observations = self.step(frame)
         # Count what THIS frame produced. Reading self.latest afterwards races with
         # a concurrently submitted frame and can report the other one's face count.
@@ -215,9 +310,38 @@ class VisionService:
         return {"running": False, "was_running": was,
                 "uptime_seconds": round(uptime, 1), "frames_processed": frames}
 
+    # Frame rate while a turn is in flight. Must keep the feed inside
+    # leave_timeout (2.0s) or a vision tool called mid-turn would be told the
+    # camera is idle and the robot would claim it cannot see anyone.
+    BUSY_FPS = 1
+
+    @contextmanager
+    def turn_in_progress(self):
+        """Throttle perception for the duration of a conversation turn.
+
+        Reentrant-safe for the single-turn-at-a-time design: turns are serialized
+        by the agent's turn lock, so there is never more than one holder.
+        """
+        self._turn_active.set()
+        try:
+            yield
+        finally:
+            self._turn_active.clear()
+
+    def _current_period(self):
+        normal = 1.0 / max(1, self.fps)
+        if not self._turn_active.is_set():
+            return normal
+        # Derived from leave_timeout, not a bare constant: the invariant "a
+        # throttled feed still counts as live" must hold for ANY configuration.
+        # A fixed 1 fps silently breaks it the moment leave_timeout is tuned below
+        # a second, and the symptom would be the robot insisting it cannot see
+        # anyone while looking straight at them. Never faster than normal either.
+        return max(normal, min(1.0 / self.BUSY_FPS, self.leave_timeout / 2.0))
+
     def _config(self):
         return {"camera": self.camera, "fps": self.fps,
-                "emotion_every": self.emotion_every, "threshold": self.threshold}
+                "emotion_interval": self.emotion_interval, "threshold": self.threshold}
 
     # A USB camera that is unplugged keeps returning (False, None) forever rather
     # than raising. Without a ceiling the loop spun at fps producing nothing while
@@ -228,19 +352,44 @@ class VisionService:
     REOPEN_ATTEMPTS = 2
 
     def _open_camera(self):
+        # fe.open_camera raises SystemExit, which is a BaseException and therefore
+        # NOT caught by `except Exception` -- the comment here used to claim it was.
+        # The escaping SystemExit killed this thread with `running` still True, so
+        # the board's camera_watch (which only re-discovers while `running` is
+        # False) never retried: one failed open left the robot blind until someone
+        # restarted the service.
         try:
-            return fe.open_camera(self.camera, self.width, self.height)
-        except Exception as e:                        # SystemExit included
+            # Pass our target rate so the camera itself throttles: see open_camera.
+            return fe.open_camera(self.camera, self.width, self.height, fps=self.fps)
+        except (Exception, SystemExit) as e:
             print(f"[vision] camera unavailable: {e}", file=sys.stderr)
             return None
 
-    def _loop(self):
+    def _loop(self, generation=0):
+        """Run the camera loop, and ALWAYS mark perception stopped on the way out.
+
+        The board's camera_watch thread re-discovers a webcam only while `running`
+        is False, so any exit path that leaves it True -- an unexpected exception,
+        a failed open, a dying USB device -- strands the robot blind with no
+        recovery. Clearing it in a finally makes every exit recoverable."""
+        try:
+            self._run_camera(generation)
+        except BaseException as e:      # a blind robot must never be a silent one
+            print(f"[vision] camera loop stopped: {type(e).__name__}: {e}",
+                  file=sys.stderr)
+        finally:
+            with self.lock:
+                # Only if we are still the current loop: a late-dying thread must
+                # not switch off a loop that has already been restarted.
+                if generation == self._generation:
+                    self.running = False
+
+    def _run_camera(self, generation):
         cap = self._open_camera()
         if cap is None:
-            with self.lock:
-                self.running = False
             return
-        period = 1.0 / max(1, self.fps)
+        # Recomputed every iteration, not cached: it drops while a turn is being
+        # answered so perception stops competing with STT and TTS for the cores.
         last_good = time.time()
         healthy_since = last_good
         reopens = 0
@@ -268,19 +417,16 @@ class VisionService:
                     if reopens > self.REOPEN_ATTEMPTS:
                         print(f"[vision] camera {self.camera} stopped delivering frames; "
                               "releasing it so it can be re-discovered", file=sys.stderr)
-                        with self.lock:
-                            self.running = False
-                        return
+                        return                    # _loop's finally clears `running`
                     print(f"[vision] camera {self.camera} went quiet; reopening "
                           f"({reopens}/{self.REOPEN_ATTEMPTS})", file=sys.stderr)
                     self._stop.wait(1.0)
                     cap = self._open_camera()
                     if cap is None:
-                        with self.lock:
-                            self.running = False
                         return
                     last_good = healthy_since = time.time()
                 dt = time.time() - t0
+                period = self._current_period()
                 if dt < period:
                     self._stop.wait(period - dt)
         finally:
@@ -302,17 +448,7 @@ class VisionService:
             # as_of jumps backwards and a face that already left is resurrected.
             now = time.time()
             if self._frame_counter % 12 == 0:
-                db_mtime = self.db_path.stat().st_mtime_ns if self.db_path.exists() else 0
-                emotion_mtime = (
-                    self.emotion_db_path.stat().st_mtime_ns
-                    if self.emotion_db_path and self.emotion_db_path.exists() else 0
-                )
-                if db_mtime != self._db_mtime:
-                    self.db = fe.load_db(self.db_path)
-                    self._db_mtime = db_mtime
-                if emotion_mtime != self._emotion_db_mtime:
-                    self.emotion_db = fe.load_emotion_db(self.emotion_db_path)
-                    self._emotion_db_mtime = emotion_mtime
+                self._refresh_dbs()
             faces = fe.detect_faces(self.detector, frame)
             self._frame_counter += 1
             enroll_best = None
@@ -336,7 +472,7 @@ class VisionService:
                 # the UI alternate between stale/empty emotion states.
                 run_emotion = (
                     self.emotion is not None
-                    and (now - track["last_emotion_at"] >= 1.5)
+                    and (now - track["last_emotion_at"] >= self.emotion_interval)
                 )
                 emotion_label, emotion_score, emotion_source, sentiment, probs = self._emotion_for(
                     frame, face, name, track, run_emotion, now)
@@ -375,9 +511,36 @@ class VisionService:
             self._expire_absent(now)
             self.latest = observations
             self.latest_t = now
+            # Held by reference, not copied: callers hand us a freshly decoded or
+            # freshly captured array and never mutate it afterwards, and a copy per
+            # frame is pure waste on a board this small.
+            self.latest_frame = frame
             self.frame_w, self.frame_h = w, h
             self.frames_processed += 1
         return observations
+
+    def snapshot_jpeg(self, quality=70):
+        """The most recent frame as JPEG bytes, or None if there is nothing live.
+
+        Lets a laptop browser see through the ROBOT's camera instead of opening
+        its own. Encoding happens per request, so a frame nobody asks for costs
+        nothing."""
+        with self.lock:
+            frame = self.latest_frame
+            stale = self._feed_dead(time.time())
+        if frame is None or stale:
+            return None
+        import cv2
+        ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+        return buf.tobytes() if ok else None
+
+    def frame_source(self):
+        """Which camera is authoritative: 'board' or 'browser'.
+
+        'board' only when this deployment actually has its own camera. With
+        --no-camera there is no vision at all, and the browser must not be told to
+        wait on a snapshot that will never arrive."""
+        return "board" if (self.owns_camera and not self.external) else "browser"
 
     # ---- internal helpers (assume lock held) ----
     def _associate(self, bbox, embedding, assigned_tracks=None):
@@ -573,21 +736,29 @@ class VisionService:
 
     def _finalize_enroll(self):
         e = self._enroll
+        self._refresh_dbs()      # merge onto the newest roster; never overwrite it
         if e["kind"] == "face":
             m = np.mean(np.stack(e["buf"]), axis=0)
             self.db[e["name"]] = (m / np.linalg.norm(m)).astype(np.float32)
-            fe.save_db(self.db_path, self.db)
+            self._save_dbs(identities=True)
         else:
             m = np.mean(np.stack(e["buf"]), axis=0)
             self.emotion_db.setdefault(e["name"], {})[e["expression"]] = m.astype(np.float32)
-            if self.emotion_db_path:
-                fe.save_emotion_db(self.emotion_db_path, self.emotion_db)
+            self._save_dbs(expressions=True)
         e["done"] = True
         e["status"] = "saved"
 
     # ================= TOOLS (read-only; return JSON-able dicts) =================
-    def start_watching(self, camera=0, fps=4, emotion_every=8, threshold=0.5):
-        return self.start(camera=camera, fps=fps, emotion_every=emotion_every, threshold=threshold)
+    def start_watching(self, camera=None, fps=None):
+        """Turn perception on, keeping every tuned setting the caller did not name.
+
+        These defaults MUST stay None. Passing concrete literals here (they used to
+        be camera=0, fps=4, threshold=0.5) meant any call rewrote the running
+        configuration: the identity threshold dropped from its tuned value back to
+        0.5, and on the board -- where camera_watch discovers the webcam at whatever
+        index it enumerated as, often not 0 -- the camera index was reset to 0 and
+        perception never came back."""
+        return self.start(camera=camera, fps=fps, external=self.external)
 
     def stop_watching(self):
         return self.stop()
@@ -641,6 +812,18 @@ class VisionService:
                 if e["done"]:
                     self._enroll = None
                     r = {"status": "saved", "name": name, "samples": captured}
+                    if expression:
+                        r["expression"] = expression
+                    return r
+                # Fail fast when no frame can EVER arrive: perception is stopped
+                # and nobody is pushing frames in. Blocking the full timeout here
+                # holds the turn lock, and on the standalone robot that is the
+                # whole conversation -- 25 seconds of deafness, then a message
+                # blaming the user's lighting for a missing camera.
+                if not self.running:
+                    self._enroll = None
+                    r = {"status": "error", "name": name,
+                         "reason": "no camera is running, so I can't see anyone to enroll"}
                     if expression:
                         r["expression"] = expression
                     return r

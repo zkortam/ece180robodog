@@ -100,6 +100,12 @@ body[data-vision="true"] .vision-lens{opacity:1;visibility:visible;transform:tra
  border:1px solid var(--glass-border)}
 #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);
  filter:saturate(.85) brightness(.86)}
+/* The robot's own eye, streamed from the board. Deliberately NOT mirrored: this
+   is a third-person view of what the robot sees, not a selfie preview. */
+#boardCam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+ filter:saturate(.85) brightness(.86)}
+body[data-eye="board"] #cam{display:none}
+body[data-eye="browser"] #boardCam{display:none}
 #visionMarks{position:absolute;inset:0}
 .track{position:absolute;border:1.5px solid rgba(255,255,255,.55);border-radius:var(--r-sm);
  min-width:34px;min-height:34px;box-shadow:0 2px 12px rgba(0,0,0,.28);
@@ -150,7 +156,7 @@ body[data-board="offline"] #board{color:var(--danger);border-color:color-mix(in 
   transition-duration:.001ms!important}
 }
 </style></head>
-<body data-state="idle" data-looking="false" data-vision="false">
+<body data-state="idle" data-looking="false" data-vision="false" data-eye="browser">
  <div class="presence" aria-hidden="true">
   <svg id="face" class="face off" viewBox="0 0 200 200">
    <defs><radialGradient id="skinGradient" cx="38%" cy="28%" r="78%">
@@ -171,6 +177,7 @@ body[data-board="offline"] #board{color:var(--danger);border-color:color-mix(in 
  <section id="visionLens" class="vision-lens" aria-hidden="true">
   <div class="vision-frame">
    <video id="cam" autoplay playsinline muted></video>
+   <img id="boardCam" alt="">
    <div id="visionMarks"></div>
    <div id="visionEmpty" class="vision-empty">No face in view</div>
   </div>
@@ -182,6 +189,7 @@ body[data-board="offline"] #board{color:var(--danger);border-color:color-mix(in 
 const faceEl=document.getElementById('face'),smile=document.getElementById('smile'),mouth=document.getElementById('mouth'),
  statusEl=document.getElementById('status'),modeText=document.getElementById('modeText'),
  cam=document.getElementById('cam'),vcanvas=document.getElementById('vcanvas'),
+ boardCam=document.getElementById('boardCam'),
  visionLens=document.getElementById('visionLens'),visionTitle=document.getElementById('visionTitle'),
  visionMarks=document.getElementById('visionMarks'),visionEmpty=document.getElementById('visionEmpty'),
  visionSummary=document.getElementById('visionSummary');
@@ -192,6 +200,11 @@ let convState='idle',pcmNode=null,silentGain=null,pcmChunks=[],pcmPreroll=[],seg
 let streamSources=new Set(),streamDone=false,playbackEnd=0,streamAbort=null;
 let voicedMs=0,silenceMs=0,speechMs=0,hasSpeech=false,pending=null,peakE=0;
 let visionOpen=false,visionKind='',visionBusy=false,turnUsedCamera=false;
+// 'browser' = this page supplies the camera (laptop dev). 'board' = the robot has
+// its own webcam and owns perception; we must not open a second camera or upload
+// competing frames, so the lens views the robot's eye instead. Learned from
+// /api/health before the camera is ever requested.
+let frameSource='browser';
 let outLevel=0,speakStart=0,frameTick=0;   // live playback level + when speaking began, for barge-in
 const API="http://127.0.0.1:8100";
 // When this page is hosted, its own /enroll route serves the enrollment UI.
@@ -243,8 +256,11 @@ function renderVision(scene){
  visionMarks.replaceChildren();visionEmpty.classList.toggle('show',!people.length);
  for(const p of people){
    const b=p.bbox||[0,0,0,0],mark=document.createElement('div'),label=document.createElement('div');
-   // The preview is mirrored, so mirror the detector's x coordinate as well.
-   mark.className='track';mark.style.left=(100-(b[0]+b[2])*100/fw)+'%';mark.style.top=(b[1]*100/fh)+'%';
+   // The browser preview is mirrored (it is a selfie view), so the detector's x
+   // must be mirrored to match. The robot's own eye is not mirrored, so it must
+   // not be -- getting this wrong puts every box on the wrong side of the frame.
+   const left=frameSource==='board'?(b[0]*100/fw):(100-(b[0]+b[2])*100/fw);
+   mark.className='track';mark.style.left=left+'%';mark.style.top=(b[1]*100/fh)+'%';
    mark.style.width=(b[2]*100/fw)+'%';mark.style.height=(b[3]*100/fh)+'%';label.className='track-label';
    const name=p.name&&p.name!=='unknown'?p.name:'Unrecognized';
    const emotion=p.emotion&&p.sentiment!=='not_enabled'?p.emotion:'';
@@ -296,7 +312,22 @@ async function startAll(){
    }
  };
  calibrated=false;calibVals=[];noiseFloor=0.01;lastT=performance.now();
- startCam();beginListen();requestAnimationFrame(vadLoop);
+ // Settle the camera question BEFORE asking for hardware: on a standalone robot
+ // the board owns the camera, and prompting for the laptop's webcam there is both
+ // a pointless permission dialog and a second feed the board would have to reject.
+ await checkBoard();
+ if(frameSource==='board'){camOk=true;startBoardEye()}else{startCam()}
+ beginListen();requestAnimationFrame(vadLoop);
+}
+// Poll the robot's own camera into the lens. Only while the lens is open: every
+// frame costs the board a JPEG encode, and it is closed most of the time.
+let boardEyeTimer=null;
+function startBoardEye(){
+ if(boardEyeTimer)return;
+ boardEyeTimer=setInterval(()=>{
+  if(!started||!visionOpen)return;
+  boardCam.src=API+'/api/vision/snapshot.jpg?t='+Date.now();
+ },400);
 }
 let voiceSmooth=0;
 function setVoiceLevel(level){
@@ -557,6 +588,9 @@ async function checkBoard(manual){
   const r=await fetch(API+'/api/health',{signal:ctl.signal,cache:'no-store'});
   clearTimeout(t);
   if(!r.ok)throw new Error('bad status');
+  // One page serves both deployments; the board tells us which one this is.
+  try{const h=await r.json();if(h&&h.frame_source){frameSource=h.frame_source;
+   document.body.dataset.eye=frameSource==='board'?'board':'browser'}}catch(e){}
   boardFails=0;setBoard('connected');return true;
  }catch(e){
   // One missed probe during a busy turn is normal; only call it offline once a

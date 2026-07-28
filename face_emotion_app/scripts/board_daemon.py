@@ -35,6 +35,11 @@ REMOTE_DIR = os.environ.get("BOARD_DIR", "/home/arduino/Documents/ece180/face_em
 VOICE_PORT = int(os.environ.get("VOICE_PORT", "8100"))
 ENROLL_PORT = int(os.environ.get("ENROLL_PORT", "8000"))
 POLL_SECONDS = float(os.environ.get("POLL_SECONDS", "3"))
+# `adb forward` connects to the DEVICE's loopback, so binding the board's services
+# to 0.0.0.0 buys nothing and exposes unauthenticated biometric enrollment and
+# camera access to everyone on the same network. Loopback by default; set
+# BOARD_BIND=0.0.0.0 deliberately if you want to reach the UI from a phone.
+BOARD_BIND = os.environ.get("BOARD_BIND", "127.0.0.1")
 
 # adb occasionally wedges. Every call is bounded so one bad invocation cannot
 # freeze the loop; a timeout is simply treated as "not reachable this tick".
@@ -175,7 +180,7 @@ class Board:
             f"VOICE_CPU_THREADS={os.environ.get('VOICE_CPU_THREADS', '4')} "
             f"VOICE_LEAD_CHUNK_MAX={os.environ.get('VOICE_LEAD_CHUNK_MAX', '32')} "
             f"VOICE_TTS={os.environ.get('VOICE_TTS', 'piper')} "
-            f"nohup ./scripts/run_voice.sh --host 0.0.0.0 --port {VOICE_PORT} "
+            f"nohup ./scripts/run_voice.sh --host {BOARD_BIND} --port {VOICE_PORT} "
             f"--browser-camera > /tmp/voice.log 2>&1 &"
         )
         self._run(["shell", cmd], timeout=START_TIMEOUT)
@@ -184,7 +189,7 @@ class Board:
         log("starting the enrollment server on the board")
         cmd = (
             f"cd '{REMOTE_DIR}' && PYTHONUNBUFFERED=1 nohup .venv-voice/bin/python "
-            f"face_emotion.py web --host 0.0.0.0 --port {ENROLL_PORT} "
+            f"face_emotion.py web --host {BOARD_BIND} --port {ENROLL_PORT} "
             f"> /tmp/enroll.log 2>&1 &"
         )
         self._run(["shell", cmd], timeout=START_TIMEOUT)

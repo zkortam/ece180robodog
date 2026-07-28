@@ -1,0 +1,79 @@
+[Unit]
+# The standalone robot: the UNO Q listens on its own USB microphone, speaks
+# through its own USB speaker, and sees through its own USB webcam. No laptop, no
+# browser, no adb tunnel. This is the unit to enable on a robot that has to work
+# when nothing else is plugged into it.
+#
+# MUTUALLY EXCLUSIVE with uno-face-emotion.service: that unit runs the CLI
+# recognizer, which opens the camera exclusively and would take /dev/video* away
+# from this one. Conflicts= makes systemd stop it rather than let the two fight
+# over the device and leave the robot intermittently blind.
+Description=RoboDog standalone voice and vision agent
+Conflicts=uno-face-emotion.service
+# network-online, not just network: the first spoken turn needs a working route to
+# api.cerebras.ai, and starting before Wi-Fi associates makes the robot announce a
+# configuration fault that fixes itself 30 s later.
+#
+# time-sync matters more than it looks. If the board has no battery-backed clock it
+# boots in 1970, every TLS certificate looks "not yet valid", and the failure
+# presents as "cannot reach api.cerebras.ai" -- sending you to debug Wi-Fi when the
+# actual problem is the date.
+After=multi-user.target sound.target network-online.target time-sync.target
+Wants=sound.target network-online.target time-sync.target
+
+[Service]
+Type=simple
+User=arduino
+WorkingDirectory=/home/arduino/Documents/ece180/face_emotion_app
+# The API key lives outside the repo, which is public. Create this file with mode
+# 0600 and a single line: CEREBRAS_API_KEY=csk-...
+EnvironmentFile=/home/arduino/.robodog/env
+Environment=PYTHONUNBUFFERED=1
+Environment=VOICE_TTS=piper
+Environment=VOICE_STT=moonshine
+Environment=VOICE_CPU_THREADS=4
+# Break the opening sentence sooner than the desktop default (55). Time-to-first-
+# word tracks the length of the FIRST chunk only, and Piper on these cores is
+# slower than a laptop, so a shorter opener starts the voice noticeably earlier.
+# board_daemon.py already passes this for the tethered setup; without it here the
+# standalone robot was the slower of the two, which is backwards.
+Environment=VOICE_LEAD_CHUNK_MAX=32
+
+# Pin the cores to their top frequency before starting.
+#
+# The QRB2210 idles at a low clock and only ramps once a workload has already been
+# running, so every short inference burst pays the ramp -- and STT and TTS are
+# exactly that shape. board_daemon.py does this over ADB for the tethered setup;
+# without it here, the STANDALONE robot would be slower than the tethered one,
+# which is backwards.
+#
+# The leading '+' runs this step as root even though the service itself drops to
+# `arduino`. Failure is ignored on purpose: a kernel without cpufreq must not stop
+# the robot from booting.
+ExecStartPre=+/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do [ -w "$g" ] && echo performance > "$g"; done; exit 0'
+# Bound to 0.0.0.0 so the UI can be opened from a laptop or phone on the same
+# network while the robot keeps running entirely on its own hardware.
+#
+# BE AWARE: there is no authentication. Anyone who can reach this port can talk to
+# the robot and read its perception state, and port 8000 (the enrollment server,
+# if you run it) can enroll and DELETE faces. Run this on a network you trust. To
+# make the robot deaf to the network and usable only through its own microphone,
+# change this to 127.0.0.1.
+ExecStart=/home/arduino/Documents/ece180/face_emotion_app/.venv-voice/bin/python \
+    -m voice_agent.main --host 0.0.0.0 --port 8100 --board-audio
+
+# A robot that dies at 2am and stays dead is useless. Restart always, but rate
+# limit it: a genuine configuration fault (missing model, bad key) fails instantly
+# every time, and an unthrottled restart loop turns that into a hot CPU and a log
+# nobody can read. Five failures inside a minute means "stop and leave the
+# evidence in journalctl".
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

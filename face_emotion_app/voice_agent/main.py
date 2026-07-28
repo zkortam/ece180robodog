@@ -15,13 +15,25 @@ from tempfile import NamedTemporaryFile
 # allow `python voice_agent/main.py` as well as `-m voice_agent.main`
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from vision_service import VisionService          # noqa: E402
+from vision_service import VisionService, capture_device_indexes   # noqa: E402
 from voice_agent import config                    # noqa: E402
 from voice_agent.orchestrator import VoiceAgent    # noqa: E402
 from voice_agent.web import create_app             # noqa: E402
 
 
 def main():
+    # Line-buffer our own diagnostics. Python block-buffers stdout whenever it is
+    # not a terminal, which is exactly how this runs in production: under systemd,
+    # under nohup, piped to a log. Startup progress and per-turn timings then sit
+    # invisible in an 8 KB buffer -- and if the process is killed they are lost
+    # entirely. On a headless robot the journal is the only way to see anything,
+    # so this must not depend on the launcher remembering PYTHONUNBUFFERED.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass                    # not a real stream (embedded/test host); harmless
+
     ap = argparse.ArgumentParser(description="RoboDog voice and vision agent")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8100)
@@ -47,60 +59,48 @@ def main():
 
     vs = VisionService(camera=args.camera, fps=args.fps,
                        width=config.VISION_WIDTH, height=config.VISION_HEIGHT,
-                       emotion_every=config.VISION_EMOTION_EVERY, threshold=config.VISION_THRESHOLD)
+                       emotion_interval=config.VISION_EMOTION_INTERVAL,
+                       threshold=config.VISION_THRESHOLD)
+    # Declared before anything starts, so a browser connecting during boot is told
+    # the truth about whose camera is authoritative. --no-camera leaves it False:
+    # there is no vision to view.
+    vs.owns_camera = bool(args.board_audio or not (args.no_camera or args.browser_camera))
+
     if args.board_audio:
-        # A board may boot before a USB camera enumerates.  The watcher starts
-        # perception as soon as one becomes usable and retries after a disconnect.
-        def capture_indexes():
-            """/dev/video* nodes that can actually be a camera, lowest index first.
-
-            Qualcomm's encoder/decoder nodes are /dev/video* too, so prefer what
-            v4l2-ctl reports. It is not installed everywhere, and a missing binary
-            used to raise straight out of the watcher thread -- leaving the board
-            permanently blind with nothing in the log. Fall back to probing the
-            nodes directly instead.
-            """
-            from glob import glob
-            import subprocess
-            found = []
-            for path in sorted(glob("/dev/video*")):
-                suffix = path.rsplit("video", 1)[1]
-                if not suffix.isdigit():
-                    continue
-                try:
-                    info = subprocess.run(["v4l2-ctl", "-D", "-d", path],
-                                          capture_output=True, text=True,
-                                          timeout=2, check=False).stdout
-                except (OSError, subprocess.SubprocessError):
-                    info = None                 # no v4l2-ctl: let the open() below decide
-                if info is None or "Video Capture" in info:
-                    found.append(int(suffix))
-            return sorted(found)
-
-        # A board may boot before a USB camera enumerates.  The watcher starts
-        # perception as soon as one becomes usable and retries after a disconnect.
+        # A board may boot before a USB camera enumerates, and on a hub the webcam
+        # can land at any index. The watcher starts perception as soon as one
+        # becomes usable and retries after a disconnect or a re-plug.
         def camera_watch():
             import cv2
             if hasattr(cv2, "setLogLevel"):
                 cv2.setLogLevel(0)
             complained = False
+            announced = None
             while True:
                 try:
                     with vs.lock:
                         running = vs.running
                     if not running:
-                        for index in capture_indexes():
+                        candidates = capture_device_indexes()
+                        if candidates != announced:
+                            print("[vision] capture nodes: " + (", ".join(
+                                f"/dev/video{i} ({n or 'unnamed'})" for i, n in candidates)
+                                or "none"))
+                            announced = candidates
+                        for index, name in candidates:
                             cap = cv2.VideoCapture(index)
                             ok, _ = cap.read() if cap.isOpened() else (False, None)
                             cap.release()
                             if ok:
-                                print(f"[vision] USB camera found at index {index}")
+                                print(f"[vision] using camera /dev/video{index} "
+                                      f"({name or 'unnamed'})")
                                 vs.start(camera=index)
                                 complained = False
                                 break
                         else:
                             if not complained:
-                                print("[vision] no usable camera yet; still looking")
+                                print("[vision] no usable camera yet; still looking "
+                                      "(is the hub powered?)")
                                 complained = True
                 # This thread is the only thing that can ever restore vision after a
                 # disconnect, so it must outlive any single failure.
