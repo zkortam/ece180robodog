@@ -21,6 +21,14 @@ Conflicts=uno-face-emotion.service
 After=multi-user.target sound.target network-online.target time-sync.target
 Wants=sound.target network-online.target time-sync.target
 
+# Restart rate limit. These MUST live in [Unit], not [Service]: systemd moved them
+# here in v229 and silently ignores them in [Service] with only a log warning --
+# so the limit would not have applied at all, and a genuine config fault (missing
+# model, bad key) would restart forever at 5 s intervals, cooking the CPU and
+# burying the real error under thousands of identical log lines.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=arduino
@@ -69,8 +77,6 @@ ExecStart=/home/arduino/Documents/ece180/face_emotion_app/.venv-voice/bin/python
 # evidence in journalctl".
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 StandardOutput=journal
 StandardError=journal
