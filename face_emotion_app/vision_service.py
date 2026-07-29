@@ -854,7 +854,13 @@ class VisionService(fe.EnrollmentStore):
 
     def list_enrolled(self):
         with self.lock:
-            emo = fe.load_emotion_db(self.emotion_db_path) if self.emotion_db_path else {}
+            # In-memory, like every other tool. This alone used to re-read and
+            # re-parse emotions.json from disk on every call -- pointless, because
+            # _refresh_dbs() already keeps that dictionary current against another
+            # process's writes, and it put filesystem latency in the middle of a
+            # conversation turn on a board with slow storage.
+            self._refresh_dbs()
+            emo = self.emotion_db
             people = []
             for name in sorted(self.db.keys()):
                 people.append({"name": name, "face_enrolled": True,

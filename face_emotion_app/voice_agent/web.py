@@ -603,14 +603,28 @@ setInterval(()=>{
   // keep streaming their camera to the server. Enrollment is the one exception --
   // it is already an explicit, in-progress request for the camera.
   if(!started||(!handsFree&&!looking))return;
-  // Pause vision inference while STT/LLM/TTS owns the small board CPU. The last
-  // frame stays fresh enough for the current turn. Active enrollment is the one
-  // exception: it needs fresh frames to collect the requested samples.
-  if(!cam.videoWidth||frameBusy||(convState==='thinking'&&!looking)||convState==='speaking')return;
-  // The camera panel is closed most of the time now, and every uploaded frame
-  // costs the board a face-detection pass. Halve the rate when nothing is
-  // watching: identity stays fresh enough, and the cores go to STT and TTS.
-  if(!visionOpen&&!looking&&(frameTick++&1))return;
+  if(!cam.videoWidth||frameBusy)return;
+  // Uploads used to stop the instant you finished speaking ('thinking'), to keep
+  // the board's cores for STT and TTS. That made the robot BLIND at exactly the
+  // moment it was asked to look: the model calls who_is_in_view after STT plus a
+  // round trip, by which point the last frame is older than leave_timeout (2s) --
+  // so on any turn slower than about two seconds it truthfully answered "no one
+  // is in view" while you were sitting right in front of it.
+  //
+  // Keep feeding during 'thinking', just slower. Most of that window is spent
+  // waiting on the network for the LLM, when the cores are idle anyway.
+  //
+  // 'speaking' still pauses: the answer is already decided, so a fresh frame
+  // cannot change it, and that is when TTS genuinely wants the CPU.
+  if(convState==='speaking'&&!looking)return;
+  // The camera panel is closed most of the time, and every uploaded frame costs
+  // the board a face-detection pass, so halve the rate when nothing is watching.
+  //
+  // Deliberately NOT thinned further during 'thinking'. At this 500ms interval a
+  // half rate is one frame per second against a 2s staleness window; anything
+  // sparser leaves no margin for a slow upload, and going stale is precisely the
+  // failure being fixed. Enrollment (`looking`) always gets every frame.
+  if(!looking&&(frameTick++&1))return;
   // Claim the slot before toBlob, not inside its callback: encoding is async, so
   // the next tick would otherwise fire a second upload while this one encodes.
   frameBusy=true;
