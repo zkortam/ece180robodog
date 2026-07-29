@@ -5,6 +5,7 @@ without hardware. What matters here is what the agent is TOLD: a robot that
 insists someone is in the room an hour after they left is worse than one that
 admits it cannot see.
 """
+import threading
 import time
 
 import numpy as np
@@ -339,3 +340,38 @@ def test_the_throttle_is_released_even_if_the_turn_raises(vs):
     with pytest.raises(RuntimeError), vs.turn_in_progress():
         raise RuntimeError("turn blew up")
     assert vs._current_period() == pytest.approx(idle)
+
+
+def test_enrolling_with_a_running_but_silent_feed_fails_fast(vs):
+    """Found on the real board. In browser-camera mode with no browser attached,
+    running is True and nothing is feeding frames -- so the earlier fast-fail
+    (which only checked `running`) missed it and "remember me" froze the agent for
+    the full 25 s timeout, measured as llm=25774ms in a live turn."""
+    vs.start(external=True)          # running, but nobody will submit_frame()
+    vs.ENROLL_NO_FEED_SECONDS = 0.3
+    started = time.time()
+    result = vs.enroll_face("zakaria", samples=4, timeout=25.0)
+    elapsed = time.time() - started
+    assert result["status"] == "error"
+    assert "frames" in result["reason"]
+    assert elapsed < 5.0, f"took {elapsed:.1f}s; should fail fast"
+
+
+def test_a_live_feed_is_still_given_the_full_timeout(vs):
+    """The fast-fail must not fire when frames ARE arriving but no face is found;
+    that is the legitimate 'center yourself, get closer' case."""
+    vs.start(external=True)
+    vs.ENROLL_NO_FEED_SECONDS = 0.3
+    stop = threading.Event()
+
+    def feed():
+        while not stop.is_set():
+            vs.submit_frame(blank_frame())
+            time.sleep(0.05)
+
+    t = threading.Thread(target=feed, daemon=True); t.start()
+    try:
+        result = vs.enroll_face("zakaria", samples=4, timeout=1.5)
+    finally:
+        stop.set(); t.join(2)
+    assert result["status"] == "timeout"      # ran the clock, not a false fast-fail

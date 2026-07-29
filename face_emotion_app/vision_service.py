@@ -800,8 +800,14 @@ class VisionService(fe.EnrollmentStore):
                             "status": "capturing", "last": 0.0}
         return self._await_enroll(name, timeout, expression)
 
+    # How long to wait for the FIRST frame before concluding nothing is feeding
+    # us. Generous enough to cover a browser that is mid-upload or a camera loop
+    # that has just started, short enough that the turn does not visibly hang.
+    ENROLL_NO_FEED_SECONDS = 3.0
+
     def _await_enroll(self, name, timeout, expression=None):
         deadline = time.time() + timeout
+        started = time.time()
         captured = 0
         while time.time() < deadline:
             with self.lock:
@@ -815,15 +821,25 @@ class VisionService(fe.EnrollmentStore):
                     if expression:
                         r["expression"] = expression
                     return r
-                # Fail fast when no frame can EVER arrive: perception is stopped
-                # and nobody is pushing frames in. Blocking the full timeout here
-                # holds the turn lock, and on the standalone robot that is the
+                # Fail fast when no frame can EVER arrive. Blocking the full
+                # timeout holds the turn lock, and on the robot that lock is the
                 # whole conversation -- 25 seconds of deafness, then a message
-                # blaming the user's lighting for a missing camera.
+                # blaming the user's lighting for what was a missing camera.
+                #
+                # TWO distinct cases, and only the first was handled. Measured on
+                # the board: browser-camera mode with no browser attached leaves
+                # running=True while nothing whatsoever is feeding frames, so
+                # "say your name" froze the agent for the full 25 s.
+                stalled = None
                 if not self.running:
+                    stalled = "no camera is running, so I can't see anyone to enroll"
+                elif (not e["buf"] and self._feed_dead(time.time())
+                      and time.time() - started > self.ENROLL_NO_FEED_SECONDS):
+                    stalled = ("I'm not receiving any camera frames, so there is "
+                               "nothing to enroll from")
+                if stalled:
                     self._enroll = None
-                    r = {"status": "error", "name": name,
-                         "reason": "no camera is running, so I can't see anyone to enroll"}
+                    r = {"status": "error", "name": name, "reason": stalled}
                     if expression:
                         r["expression"] = expression
                     return r
