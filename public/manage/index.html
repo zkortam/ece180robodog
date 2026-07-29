@@ -197,6 +197,15 @@ button.primary.active{background:var(--neg);border-color:var(--neg);color:#fff}
   <section class="people" aria-labelledby="peopleTitle">
     <div class="people-head" id="peopleTitle">Saved people</div>
     <div id="peopleList"><div class="people-empty">loading…</div></div>
+    <!-- Enrol on any machine, hand the file over, load it onto the robot.
+         Only the compact prototypes travel; no images ever leave the capturing
+         machine, which is why this is a small JSON and not a photo upload. -->
+    <div class="chips" id="transfer">
+      <span class="clabel">Transfer</span>
+      <button class="chip" id="exportBtn" title="Download this person's enrollment as a file to send on">Download my data</button>
+      <button class="chip" id="importBtn" title="Load an enrollment file someone sent you">Load a file…</button>
+      <input type="file" id="importFile" accept="application/json,.json" style="display:none">
+    </div>
   </section>
   </div>
 </div>
@@ -212,6 +221,9 @@ let stream=null,timer=null,mode='idle';
 const canvas=document.createElement('canvas');
 const poses=['center','left','right','up','down'];
 const samplesPerPose=12,totalSamples=poses.length*samplesPerPose;
+// Order matters: neutral first gives the model a baseline for this face, and it
+// is the easiest to hold, so the run starts with a win rather than a struggle.
+const EXPRESSIONS=['neutral','happy','sad','surprise'];
 
 function say(t){status.textContent=t}
 function stopLoop(){if(timer){clearInterval(timer);timer=null}mode='idle'}
@@ -308,66 +320,163 @@ recBtn.onclick=async()=>{
   },250);
 };
 
+// ---------------- one capture loop, used by face AND expression training ------
+//
+// Two guards here are not decoration; their absence produced a bug that reported
+// FAILURE for training that had actually succeeded:
+//
+//  * `busy` -- each frame POST runs a full face detect (plus an expression pass)
+//    on the board, which takes longer than the interval. Without an in-flight
+//    guard the requests pile up and several callbacks run concurrently.
+//  * `finished` -- which let more than one of them see count>=samples and call
+//    done(). The first finish saved and returned "saved"; the second found
+//    nothing left to save and returned "idle", and the UI printed "nothing
+//    captured, try again" over a perfectly good result.
+//
+// The status mapping is also honest now: only an genuinely empty capture says so.
+async function captureLoop({kind,beginUrl,frameUrl,finishUrl,beginBody,samples,
+                            poseFor,hintFor,okText}){
+  let count=0,busy=false,finished=false;
+  stopLoop();setRec(false);mode=kind;readout.classList.remove('on');
+  await post(beginUrl,beginBody);
+  lock(true);setTraining(true);showGuide(true,hintFor(poseFor(0)));
+  return await new Promise(resolve=>{
+    const done=async(reason)=>{
+      if(finished)return;finished=true;
+      stopLoop();
+      const r=await post(finishUrl,{});
+      if(r.status==='saved')say(okText(r));
+      else if(r.status==='empty')say('Nothing usable captured - center your face, get closer, and make sure it is well lit');
+      else say(reason||'Stopped');
+      lock(false);setTraining(false);showGuide(false);
+      refreshChips();refreshPeople();
+      resolve(r.status==='saved');
+    };
+    timer=setInterval(async()=>{
+      if(mode!==kind||finished)return;
+      if(busy)return;                     // the board is still working on the last frame
+      busy=true;
+      try{
+        const pose=poseFor(count);
+        const o=await post(frameUrl,{frame:grab(),pose});
+        if(o.status==='captured'){
+          count=o.count;showGuide(true,hintFor(poseFor(count)),true);
+          say('Captured '+count+' / '+samples+' - '+hintFor(poseFor(count)));
+        }else if(o.status==='adjust'||o.status==='no_face'){
+          showGuide(true,o.guidance||hintFor(pose),false);
+          say(o.guidance||hintFor(pose));
+        }
+      }catch(e){
+        // A dropped request must not wedge the loop at 'busy' forever.
+      }finally{busy=false}
+      if(count>=samples)done();
+    },160);
+  });
+}
+
+async function enrollFace(name){
+  return await captureLoop({
+    kind:'enroll',beginUrl:'/api/enroll/begin',frameUrl:'/api/enroll/frame',
+    finishUrl:'/api/enroll/finish',beginBody:{name,samples:totalSamples},
+    samples:totalSamples,poseFor:poseAt,hintFor:(p)=>posePrompt(p),
+    okText:()=>'Saved '+name,
+  });
+}
+
+// Expressions are captured HEAD-ON only, and far fewer of them.
+//
+// They used to reuse the face-enrollment pose sequence: 60 samples marched
+// through center, left, right, up and down -- while you tried to hold a smile.
+// The server enforces those poses, so it simply refuses to capture until you
+// turn your head far enough, and turning your head changes the very expression
+// being recorded. Repetition of one held expression is what a prototype needs;
+// pose variety is what a FACE embedding needs. They are different jobs.
+const EXPR_SAMPLES=18;
+async function trainExpression(name,expr){
+  return await captureLoop({
+    kind:'train',beginUrl:'/api/emotion/enroll/begin',
+    frameUrl:'/api/emotion/enroll/frame',finishUrl:'/api/emotion/enroll/finish',
+    beginBody:{name,expression:expr},samples:EXPR_SAMPLES,
+    poseFor:()=>'center',
+    hintFor:()=>'Hold a '+expr.toUpperCase()+' expression, looking at the camera',
+    okText:()=>'Learned '+expr+' for '+name,
+  });
+}
+
+function pause(ms){return new Promise(r=>setTimeout(r,ms))}
+async function countdown(message,seconds){
+  for(let s=seconds;s>0;s--){say(message+'  ...'+s);await pause(1000)}
+  say(message+'  - go');
+}
+
+// The guided run. Enrolling a face and then hunting for four separate buttons,
+// with no prompt telling you what to do, is what made this feel unintuitive.
+async function trainAllExpressions(name){
+  for(const expr of EXPRESSIONS){
+    showGuide(true,'Get ready: '+expr.toUpperCase());
+    await countdown('Make a '+expr.toUpperCase()+' face',3);
+    let ok=await trainExpression(name,expr);
+    if(!ok){
+      await countdown('Let us retry '+expr.toUpperCase(),3);
+      ok=await trainExpression(name,expr);
+    }
+    if(!ok)say('Skipped '+expr+' - you can retrain it from its button any time');
+    await pause(600);
+  }
+  say('All done. '+name+' is enrolled with expressions.');
+}
+
 enrollBtn.onclick=async()=>{
   const name=nameInput.value.trim();
   if(!name){nameInput.focus();return}
   try{await camera()}catch(e){say('camera blocked');return}
-  stopLoop();setRec(false);mode='enroll';readout.classList.remove('on');
-  const samples=totalSamples;let count=0;
-  await post('/api/enroll/begin',{name,samples});
-  lock(true);setTraining(true);showGuide(true,posePrompt(poseAt(0)));
-  const done=async()=>{
-    stopLoop();
-    const r=await post('/api/enroll/finish',{});
-    say(r.status==='saved'?('saved '+name):'nothing captured, try again');
-    lock(false);setTraining(false);refreshPeople();
-  };
-  timer=setInterval(async()=>{
-    if(mode!=='enroll')return;
-    const pose=poseAt(count);
-    const o=await post('/api/enroll/frame',{frame:grab(),pose});
-    if(o.status==='captured'){
-      count=o.count;showGuide(true,posePrompt(poseAt(count)),true);
-      say('Captured '+count+' / '+samples+', pose '+Math.min(poses.length,Math.floor(count/samplesPerPose)+1)+' / '+poses.length);
-    }else if(o.status==='adjust'||o.status==='no_face'){
-      showGuide(true,o.guidance||posePrompt(pose),false);say('Paused, '+(o.guidance||'adjust your pose'));
-    }
-    if(count>=samples)done();
-  },180);
+  const ok=await enrollFace(name);
+  if(!ok)return;
+  await pause(500);
+  await trainAllExpressions(name);
 };
 
+// The individual buttons still work, for retraining one expression on its own.
 chips.forEach(chip=>chip.onclick=async()=>{
   const name=nameInput.value.trim();
   if(!name){nameInput.focus();return}
-  const expr=chip.dataset.expr;
   try{await camera()}catch(e){say('camera blocked');return}
-  stopLoop();setRec(false);mode='train';readout.classList.remove('on');
-  const samples=totalSamples;let count=0;
-  await post('/api/emotion/enroll/begin',{name,expression:expr});
-  lock(true);setTraining(true);showGuide(true,posePrompt(poseAt(0),expr));
-  const done=async()=>{
-    stopLoop();
-    const r=await post('/api/emotion/enroll/finish',{});
-    say(r.status==='saved'?('learned '+expr+' for '+name):'nothing captured, try again');
-    lock(false);setTraining(false);refreshChips();refreshPeople();
-  };
-  timer=setInterval(async()=>{
-    if(mode!=='train')return;
-    const pose=poseAt(count);
-    const o=await post('/api/emotion/enroll/frame',{frame:grab(),pose});
-    if(o.status==='captured'){
-      count=o.count;showGuide(true,posePrompt(poseAt(count),expr),true);
-      say('Captured '+count+' / '+samples+', keep the '+expr+' expression');
-    }else if(o.status==='adjust'||o.status==='no_face'){
-      showGuide(true,o.guidance||posePrompt(pose,expr),false);say('Paused, '+(o.guidance||'adjust your pose'));
-    }
-    if(count>=samples)done();
-  },160);
+  const expr=chip.dataset.expr;
+  await countdown('Make a '+expr.toUpperCase()+' face',3);
+  await trainExpression(name,expr);
 });
 
 cancelBtn.onclick=async()=>{
   stopLoop();await post('/api/enroll/cancel',{});lock(false);setTraining(false);
   say('training cancelled');
+};
+
+// ---------------- transfer: enrol anywhere, run on the robot -----------------
+document.getElementById('exportBtn').onclick=()=>{
+  const name=nameInput.value.trim();
+  // Named box filled in -> just that person; empty -> everyone on this machine.
+  const url=API+'/api/enroll/export'+(name?('?name='+encodeURIComponent(name)):'');
+  const a=document.createElement('a');
+  a.href=url;a.download=(name||'robodog-enrollments')+'.json';
+  document.body.appendChild(a);a.click();a.remove();
+  say(name?('Downloading '+name+' - send that file to whoever runs the robot')
+          :'Downloading everyone enrolled here');
+};
+document.getElementById('importBtn').onclick=()=>document.getElementById('importFile').click();
+document.getElementById('importFile').onchange=async(ev)=>{
+  const file=ev.target.files&&ev.target.files[0];
+  if(!file)return;
+  ev.target.value='';                       // let the same file be picked again
+  say('Loading '+file.name+'…');
+  const fd=new FormData();fd.append('bundle',file,file.name);
+  try{
+    const r=await fetch(API+'/api/enroll/import',{method:'POST',body:fd});
+    const j=await r.json();
+    if(!r.ok){say('Could not load that file: '+(j.error||r.status));return}
+    const who=(j.people||[]).join(', ')||'nobody new';
+    say('Loaded '+who+(j.skipped&&j.skipped.length?(' (already present: '+j.skipped.join(', ')+')'):''));
+    refreshPeople();refreshChips();
+  }catch(e){say('Could not reach the server to load that file')}
 };
 
 refreshChips();refreshPeople();

@@ -99,11 +99,25 @@ def enrollment_guidance(frame, face, required_pose="center"):
     height, width = frame.shape[:2]
     x, y, fw, fh = [float(v) for v in face[:4]]
     cx, cy = x + fw / 2.0, y + fh / 2.0
-    if fw / width < 0.22 or fh / height < 0.30:
+
+    # Looking up or down FORESHORTENS the face: the detector's box gets shorter,
+    # and the head also physically moves within the frame. Judged by the head-on
+    # framing rule, a correctly-performed "look down" fails the height test and is
+    # told to "move closer" -- punishing the person for doing exactly what was
+    # asked, with advice that makes it worse. Down is the worst affected because
+    # the chin tucks and the forehead dominates the box.
+    #
+    # Relax the vertical checks for exactly those two poses. The horizontal ones
+    # are untouched: nothing about looking up or down should move you sideways.
+    tilted = required_pose in ("up", "down")
+    min_height_frac = 0.20 if tilted else 0.30
+    cy_low, cy_high = (0.14, 0.86) if tilted else (0.25, 0.75)
+
+    if fw / width < 0.22 or fh / height < min_height_frac:
         return False, "Move closer until your face fills the guide"
     if fw / width > 0.68 or fh / height > 0.82:
         return False, "Move back slightly"
-    if not (0.28 * width <= cx <= 0.72 * width and 0.25 * height <= cy <= 0.75 * height):
+    if not (0.28 * width <= cx <= 0.72 * width and cy_low * height <= cy <= cy_high * height):
         return False, "Center your face inside the guide"
 
     right_eye = np.asarray(face[4:6], dtype=np.float32)
@@ -171,6 +185,12 @@ def is_allowed_ui_origin(origin: str | None, extra=()) -> bool:
     project = VERCEL_PROJECT.lower()
     # exact production host, or one of our own preview hosts
     return bool(project) and (label == project or label.startswith(project + "-"))
+
+
+def _safe_filename(stem: str) -> str:
+    """A download filename that cannot smuggle a path or a header break."""
+    cleaned = "".join(c for c in stem if c.isalnum() or c in "-_")[:48]
+    return cleaned or "enrollments"
 
 
 def file_mtime_ns(path: Path | None) -> int:
@@ -577,6 +597,100 @@ class FaceEngine(EnrollmentStore):
             self.enroll_embeddings = []
             return result
 
+    # ---- portable enrollment bundles (enroll anywhere, load onto the robot) ----
+    #
+    # A bundle carries only the compact prototypes: a 128-float face embedding and
+    # the averaged expression vectors. No images and no video ever leave the
+    # machine that did the capture, which is the whole reason this is a file and
+    # not a photo upload.
+
+    BUNDLE_VERSION = 1
+
+    def export_people(self, names=None):
+        """A JSON-able bundle of the named people (all of them when names is None)."""
+        with self.lock:
+            self._refresh_dbs()
+            wanted = sorted(set(self.db) | set(self.emotion_db))
+            if names:
+                requested = {n.strip().lower() for n in names if n and n.strip()}
+                wanted = [n for n in wanted if n.lower() in requested]
+            people = {}
+            for name in wanted:
+                entry = {}
+                if name in self.db:
+                    entry["face"] = np.asarray(self.db[name], dtype=np.float32).tolist()
+                if name in self.emotion_db:
+                    entry["expressions"] = {
+                        expr: np.asarray(vec, dtype=np.float32).tolist()
+                        for expr, vec in self.emotion_db[name].items()}
+                if entry:
+                    people[name] = entry
+            return {"version": self.BUNDLE_VERSION, "people": people}
+
+    def import_people(self, bundle, overwrite=True):
+        """Merge a bundle produced by export_people. Returns what changed.
+
+        Validated rather than trusted: this file arrives by email or a chat app,
+        so a malformed or hostile one must produce a clean error, not a traceback
+        and not a corrupted database.
+        """
+        if not isinstance(bundle, dict):
+            raise ValueError("bundle must be a JSON object")
+        if bundle.get("version") != self.BUNDLE_VERSION:
+            raise ValueError(f"unsupported bundle version {bundle.get('version')!r}")
+        people = bundle.get("people")
+        if not isinstance(people, dict) or not people:
+            raise ValueError("bundle contains no people")
+
+        expected_dim = None
+        for vec in self.db.values():
+            expected_dim = len(vec)
+            break
+
+        staged_faces, staged_exprs = {}, {}
+        for name, entry in people.items():
+            name = str(name).strip()
+            if not name:
+                raise ValueError("bundle contains an unnamed person")
+            if not isinstance(entry, dict):
+                raise ValueError(f"malformed entry for {name!r}")
+            if "face" in entry:
+                face = np.asarray(entry["face"], dtype=np.float32).reshape(-1)
+                if face.size == 0 or not np.all(np.isfinite(face)):
+                    raise ValueError(f"{name}: face embedding is empty or not finite")
+                if expected_dim and face.size != expected_dim:
+                    raise ValueError(
+                        f"{name}: face embedding has {face.size} values, expected {expected_dim}")
+                norm = float(np.linalg.norm(face))
+                if norm <= 0:
+                    raise ValueError(f"{name}: face embedding has zero magnitude")
+                staged_faces[name] = (face / norm).astype(np.float32)   # renormalize
+            for expr, vec in (entry.get("expressions") or {}).items():
+                arr = np.asarray(vec, dtype=np.float32).reshape(-1)
+                if arr.size == 0 or not np.all(np.isfinite(arr)):
+                    raise ValueError(f"{name}/{expr}: expression vector is unusable")
+                staged_exprs.setdefault(name, {})[str(expr).strip().lower()] = arr
+
+        # Nothing is written until every entry above has validated, so a bad file
+        # cannot leave the database half-updated.
+        with self.lock:
+            self._refresh_dbs()
+            added, skipped = [], []
+            for name, face in staged_faces.items():
+                if name in self.db and not overwrite:
+                    skipped.append(name)
+                    continue
+                self.db[name] = face
+                added.append(name)
+            for name, exprs in staged_exprs.items():
+                if name in skipped:
+                    continue
+                self.emotion_db.setdefault(name, {}).update(exprs)
+            self._save_dbs(identities=bool(staged_faces), expressions=bool(staged_exprs))
+            return {"status": "imported", "people": sorted(added),
+                    "skipped": sorted(skipped),
+                    "expressions": {n: sorted(e) for n, e in staged_exprs.items()}}
+
     def recognize_frame(self, frame):
         with self.lock:
             self._refresh_dbs()      # a face enrolled by voice must be recognized here too
@@ -974,6 +1088,15 @@ button.primary.active{background:var(--neg);border-color:var(--neg);color:#fff}
   <section class="people" aria-labelledby="peopleTitle">
     <div class="people-head" id="peopleTitle">Saved people</div>
     <div id="peopleList"><div class="people-empty">loading…</div></div>
+    <!-- Enrol on any machine, hand the file over, load it onto the robot.
+         Only the compact prototypes travel; no images ever leave the capturing
+         machine, which is why this is a small JSON and not a photo upload. -->
+    <div class="chips" id="transfer">
+      <span class="clabel">Transfer</span>
+      <button class="chip" id="exportBtn" title="Download this person's enrollment as a file to send on">Download my data</button>
+      <button class="chip" id="importBtn" title="Load an enrollment file someone sent you">Load a file…</button>
+      <input type="file" id="importFile" accept="application/json,.json" style="display:none">
+    </div>
   </section>
   </div>
 </div>
@@ -989,6 +1112,9 @@ let stream=null,timer=null,mode='idle';
 const canvas=document.createElement('canvas');
 const poses=['center','left','right','up','down'];
 const samplesPerPose=12,totalSamples=poses.length*samplesPerPose;
+// Order matters: neutral first gives the model a baseline for this face, and it
+// is the easiest to hold, so the run starts with a win rather than a struggle.
+const EXPRESSIONS=['neutral','happy','sad','surprise'];
 
 function say(t){status.textContent=t}
 function stopLoop(){if(timer){clearInterval(timer);timer=null}mode='idle'}
@@ -1085,66 +1211,163 @@ recBtn.onclick=async()=>{
   },250);
 };
 
+// ---------------- one capture loop, used by face AND expression training ------
+//
+// Two guards here are not decoration; their absence produced a bug that reported
+// FAILURE for training that had actually succeeded:
+//
+//  * `busy` -- each frame POST runs a full face detect (plus an expression pass)
+//    on the board, which takes longer than the interval. Without an in-flight
+//    guard the requests pile up and several callbacks run concurrently.
+//  * `finished` -- which let more than one of them see count>=samples and call
+//    done(). The first finish saved and returned "saved"; the second found
+//    nothing left to save and returned "idle", and the UI printed "nothing
+//    captured, try again" over a perfectly good result.
+//
+// The status mapping is also honest now: only an genuinely empty capture says so.
+async function captureLoop({kind,beginUrl,frameUrl,finishUrl,beginBody,samples,
+                            poseFor,hintFor,okText}){
+  let count=0,busy=false,finished=false;
+  stopLoop();setRec(false);mode=kind;readout.classList.remove('on');
+  await post(beginUrl,beginBody);
+  lock(true);setTraining(true);showGuide(true,hintFor(poseFor(0)));
+  return await new Promise(resolve=>{
+    const done=async(reason)=>{
+      if(finished)return;finished=true;
+      stopLoop();
+      const r=await post(finishUrl,{});
+      if(r.status==='saved')say(okText(r));
+      else if(r.status==='empty')say('Nothing usable captured - center your face, get closer, and make sure it is well lit');
+      else say(reason||'Stopped');
+      lock(false);setTraining(false);showGuide(false);
+      refreshChips();refreshPeople();
+      resolve(r.status==='saved');
+    };
+    timer=setInterval(async()=>{
+      if(mode!==kind||finished)return;
+      if(busy)return;                     // the board is still working on the last frame
+      busy=true;
+      try{
+        const pose=poseFor(count);
+        const o=await post(frameUrl,{frame:grab(),pose});
+        if(o.status==='captured'){
+          count=o.count;showGuide(true,hintFor(poseFor(count)),true);
+          say('Captured '+count+' / '+samples+' - '+hintFor(poseFor(count)));
+        }else if(o.status==='adjust'||o.status==='no_face'){
+          showGuide(true,o.guidance||hintFor(pose),false);
+          say(o.guidance||hintFor(pose));
+        }
+      }catch(e){
+        // A dropped request must not wedge the loop at 'busy' forever.
+      }finally{busy=false}
+      if(count>=samples)done();
+    },160);
+  });
+}
+
+async function enrollFace(name){
+  return await captureLoop({
+    kind:'enroll',beginUrl:'/api/enroll/begin',frameUrl:'/api/enroll/frame',
+    finishUrl:'/api/enroll/finish',beginBody:{name,samples:totalSamples},
+    samples:totalSamples,poseFor:poseAt,hintFor:(p)=>posePrompt(p),
+    okText:()=>'Saved '+name,
+  });
+}
+
+// Expressions are captured HEAD-ON only, and far fewer of them.
+//
+// They used to reuse the face-enrollment pose sequence: 60 samples marched
+// through center, left, right, up and down -- while you tried to hold a smile.
+// The server enforces those poses, so it simply refuses to capture until you
+// turn your head far enough, and turning your head changes the very expression
+// being recorded. Repetition of one held expression is what a prototype needs;
+// pose variety is what a FACE embedding needs. They are different jobs.
+const EXPR_SAMPLES=18;
+async function trainExpression(name,expr){
+  return await captureLoop({
+    kind:'train',beginUrl:'/api/emotion/enroll/begin',
+    frameUrl:'/api/emotion/enroll/frame',finishUrl:'/api/emotion/enroll/finish',
+    beginBody:{name,expression:expr},samples:EXPR_SAMPLES,
+    poseFor:()=>'center',
+    hintFor:()=>'Hold a '+expr.toUpperCase()+' expression, looking at the camera',
+    okText:()=>'Learned '+expr+' for '+name,
+  });
+}
+
+function pause(ms){return new Promise(r=>setTimeout(r,ms))}
+async function countdown(message,seconds){
+  for(let s=seconds;s>0;s--){say(message+'  ...'+s);await pause(1000)}
+  say(message+'  - go');
+}
+
+// The guided run. Enrolling a face and then hunting for four separate buttons,
+// with no prompt telling you what to do, is what made this feel unintuitive.
+async function trainAllExpressions(name){
+  for(const expr of EXPRESSIONS){
+    showGuide(true,'Get ready: '+expr.toUpperCase());
+    await countdown('Make a '+expr.toUpperCase()+' face',3);
+    let ok=await trainExpression(name,expr);
+    if(!ok){
+      await countdown('Let us retry '+expr.toUpperCase(),3);
+      ok=await trainExpression(name,expr);
+    }
+    if(!ok)say('Skipped '+expr+' - you can retrain it from its button any time');
+    await pause(600);
+  }
+  say('All done. '+name+' is enrolled with expressions.');
+}
+
 enrollBtn.onclick=async()=>{
   const name=nameInput.value.trim();
   if(!name){nameInput.focus();return}
   try{await camera()}catch(e){say('camera blocked');return}
-  stopLoop();setRec(false);mode='enroll';readout.classList.remove('on');
-  const samples=totalSamples;let count=0;
-  await post('/api/enroll/begin',{name,samples});
-  lock(true);setTraining(true);showGuide(true,posePrompt(poseAt(0)));
-  const done=async()=>{
-    stopLoop();
-    const r=await post('/api/enroll/finish',{});
-    say(r.status==='saved'?('saved '+name):'nothing captured, try again');
-    lock(false);setTraining(false);refreshPeople();
-  };
-  timer=setInterval(async()=>{
-    if(mode!=='enroll')return;
-    const pose=poseAt(count);
-    const o=await post('/api/enroll/frame',{frame:grab(),pose});
-    if(o.status==='captured'){
-      count=o.count;showGuide(true,posePrompt(poseAt(count)),true);
-      say('Captured '+count+' / '+samples+', pose '+Math.min(poses.length,Math.floor(count/samplesPerPose)+1)+' / '+poses.length);
-    }else if(o.status==='adjust'||o.status==='no_face'){
-      showGuide(true,o.guidance||posePrompt(pose),false);say('Paused, '+(o.guidance||'adjust your pose'));
-    }
-    if(count>=samples)done();
-  },180);
+  const ok=await enrollFace(name);
+  if(!ok)return;
+  await pause(500);
+  await trainAllExpressions(name);
 };
 
+// The individual buttons still work, for retraining one expression on its own.
 chips.forEach(chip=>chip.onclick=async()=>{
   const name=nameInput.value.trim();
   if(!name){nameInput.focus();return}
-  const expr=chip.dataset.expr;
   try{await camera()}catch(e){say('camera blocked');return}
-  stopLoop();setRec(false);mode='train';readout.classList.remove('on');
-  const samples=totalSamples;let count=0;
-  await post('/api/emotion/enroll/begin',{name,expression:expr});
-  lock(true);setTraining(true);showGuide(true,posePrompt(poseAt(0),expr));
-  const done=async()=>{
-    stopLoop();
-    const r=await post('/api/emotion/enroll/finish',{});
-    say(r.status==='saved'?('learned '+expr+' for '+name):'nothing captured, try again');
-    lock(false);setTraining(false);refreshChips();refreshPeople();
-  };
-  timer=setInterval(async()=>{
-    if(mode!=='train')return;
-    const pose=poseAt(count);
-    const o=await post('/api/emotion/enroll/frame',{frame:grab(),pose});
-    if(o.status==='captured'){
-      count=o.count;showGuide(true,posePrompt(poseAt(count),expr),true);
-      say('Captured '+count+' / '+samples+', keep the '+expr+' expression');
-    }else if(o.status==='adjust'||o.status==='no_face'){
-      showGuide(true,o.guidance||posePrompt(pose,expr),false);say('Paused, '+(o.guidance||'adjust your pose'));
-    }
-    if(count>=samples)done();
-  },160);
+  const expr=chip.dataset.expr;
+  await countdown('Make a '+expr.toUpperCase()+' face',3);
+  await trainExpression(name,expr);
 });
 
 cancelBtn.onclick=async()=>{
   stopLoop();await post('/api/enroll/cancel',{});lock(false);setTraining(false);
   say('training cancelled');
+};
+
+// ---------------- transfer: enrol anywhere, run on the robot -----------------
+document.getElementById('exportBtn').onclick=()=>{
+  const name=nameInput.value.trim();
+  // Named box filled in -> just that person; empty -> everyone on this machine.
+  const url=API+'/api/enroll/export'+(name?('?name='+encodeURIComponent(name)):'');
+  const a=document.createElement('a');
+  a.href=url;a.download=(name||'robodog-enrollments')+'.json';
+  document.body.appendChild(a);a.click();a.remove();
+  say(name?('Downloading '+name+' - send that file to whoever runs the robot')
+          :'Downloading everyone enrolled here');
+};
+document.getElementById('importBtn').onclick=()=>document.getElementById('importFile').click();
+document.getElementById('importFile').onchange=async(ev)=>{
+  const file=ev.target.files&&ev.target.files[0];
+  if(!file)return;
+  ev.target.value='';                       // let the same file be picked again
+  say('Loading '+file.name+'…');
+  const fd=new FormData();fd.append('bundle',file,file.name);
+  try{
+    const r=await fetch(API+'/api/enroll/import',{method:'POST',body:fd});
+    const j=await r.json();
+    if(!r.ok){say('Could not load that file: '+(j.error||r.status));return}
+    const who=(j.people||[]).join(', ')||'nobody new';
+    say('Loaded '+who+(j.skipped&&j.skipped.length?(' (already present: '+j.skipped.join(', ')+')'):''));
+    refreshPeople();refreshChips();
+  }catch(e){say('Could not reach the server to load that file')}
 };
 
 refreshChips();refreshPeople();
@@ -1156,7 +1379,7 @@ refreshChips();refreshPeople();
 
 def command_web(args):
     try:
-        from flask import Flask, jsonify, request
+        from flask import Flask, Response, jsonify, request
     except Exception as exc:
         raise SystemExit("Flask is required for web mode. Install requirements.txt.") from exc
 
@@ -1300,6 +1523,39 @@ def command_web(args):
     @app.post("/api/enroll/delete")
     def api_enroll_delete():
         return jsonify(engine.remove_person(required(body(), "name")))
+
+    @app.get("/api/enroll/export")
+    def api_enroll_export():
+        """Download enrolled people as a portable bundle.
+
+        ?name=alex exports one person; no query exports everyone. Only the compact
+        prototypes travel -- no images, no frames.
+        """
+        names = [n for n in request.args.getlist("name") if n.strip()]
+        bundle = engine.export_people(names or None)
+        if not bundle["people"]:
+            raise BadRequest("no matching enrolled people to export")
+        stem = names[0].strip() if len(names) == 1 else "robodog-enrollments"
+        return Response(
+            json.dumps(bundle, indent=2),
+            mimetype="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{_safe_filename(stem)}.json"'})
+
+    @app.post("/api/enroll/import")
+    def api_enroll_import():
+        """Load a bundle someone else produced. Accepts a file upload or raw JSON."""
+        upload = request.files.get("bundle")
+        if upload is not None:
+            try:
+                bundle = json.loads(upload.read().decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise BadRequest(f"that file is not valid JSON: {exc}") from exc
+        else:
+            bundle = body()
+        try:
+            return jsonify(engine.import_people(bundle))
+        except ValueError as exc:
+            raise BadRequest(str(exc)) from exc
 
     @app.post("/api/recognize")
     def api_recognize():

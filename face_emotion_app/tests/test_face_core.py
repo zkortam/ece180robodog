@@ -175,3 +175,59 @@ def test_origin_matching_ignores_port_and_case():
 ])
 def test_sentiment_mapping(label, expected):
     assert fe.sentiment_from_emotion(label) == expected
+
+
+# --------------------------------------------------- pose-aware framing checks
+
+def face_box(x, y, w, h, yaw_px=0.0):
+    """A YuNet-shaped detection: bbox + 5 landmarks (right eye, left eye, nose...)."""
+    cx = x + w / 2.0
+    return np.array([x, y, w, h,
+                     cx - 10, y + h * 0.35,          # right eye
+                     cx + 10, y + h * 0.35,          # left eye
+                     cx + yaw_px, y + h * 0.55,      # nose
+                     cx - 8, y + h * 0.75,
+                     cx + 8, y + h * 0.75,
+                     0.99], dtype=np.float32)
+
+
+def frame(w=320, h=240):
+    return np.zeros((h, w, 3), dtype=np.uint8)
+
+
+def test_a_head_on_face_is_accepted():
+    ok, _ = fe.enrollment_guidance(frame(), face_box(90, 60, 130, 120), "center")
+    assert ok
+
+
+def test_looking_down_is_accepted_despite_foreshortening():
+    """THE regression the user hit: 'down it struggles'. Tilting the head shortens
+    the detected box and moves it down the frame. Judged by the head-on rule that
+    fails the height test and is told to 'move closer' -- punishing someone for
+    doing exactly what was asked, with advice that makes it worse."""
+    tilted = face_box(90, 130, 130, 60)          # short box, low in frame
+
+    ok_down, msg_down = fe.enrollment_guidance(frame(), tilted, "down")
+    ok_center, _ = fe.enrollment_guidance(frame(), tilted, "center")
+    assert ok_down, f"down should accept a foreshortened face, got {msg_down!r}"
+    assert not ok_center, "the head-on rule should still be strict"
+
+
+def test_looking_up_is_accepted_despite_foreshortening():
+    tilted = face_box(90, 18, 130, 60)           # short box, high in frame
+    ok, msg = fe.enrollment_guidance(frame(), tilted, "up")
+    assert ok, f"up should accept a foreshortened face, got {msg!r}"
+
+
+def test_a_face_that_is_genuinely_too_small_is_still_rejected():
+    """Relaxing the tilt cases must not accept someone across the room."""
+    ok, msg = fe.enrollment_guidance(frame(), face_box(140, 100, 40, 30), "down")
+    assert not ok
+    assert "closer" in msg
+
+
+def test_tilting_does_not_relax_the_horizontal_checks():
+    """Nothing about looking down should let you drift off to one side."""
+    ok, msg = fe.enrollment_guidance(frame(), face_box(5, 130, 130, 60), "down")
+    assert not ok
+    assert "Center" in msg

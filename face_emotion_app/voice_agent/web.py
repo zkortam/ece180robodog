@@ -153,6 +153,29 @@ body[data-eye="browser"] #boardCam{display:none}
 #visionSummary{color:var(--text-4);font-size:13px;font-weight:400;
  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
+/* ---------- type-instead-of-talk ----------
+   A room too loud for the VAD makes the whole thing unusable, and there was no
+   way through at all. Same turn, same tools, same voice reply -- just a
+   different way in. Sits low and quiet so it never competes with the face. */
+.composer{position:fixed;z-index:9;left:50%;bottom:clamp(16px,3vh,30px);transform:translateX(-50%);
+ display:flex;align-items:center;gap:8px;width:min(86vw,430px);padding:6px 6px 6px 16px;
+ border-radius:var(--r-full);background:var(--glass);border:1px solid var(--glass-border);
+ backdrop-filter:blur(var(--blur-glass)) saturate(1.3);-webkit-backdrop-filter:blur(var(--blur-glass)) saturate(1.3);
+ box-shadow:var(--glass-shadow);opacity:.55;
+ transition:opacity .35s var(--ease),border-color .35s var(--ease),transform .35s var(--ease)}
+.composer:hover,.composer:focus-within{opacity:1;border-color:var(--glass-border-2)}
+.composer:focus-within{transform:translateX(-50%) translateY(-2px)}
+#composerInput{flex:1;min-width:0;background:none;border:0;outline:none;color:var(--text);
+ font-family:inherit;font-size:14px;line-height:1.4;padding:6px 0}
+#composerInput::placeholder{color:var(--text-4)}
+#composerSend{flex:none;width:32px;height:32px;border-radius:50%;border:0;cursor:pointer;
+ background:var(--glass-2);color:var(--text-2);font-size:15px;line-height:1;
+ transition:background .25s var(--ease),color .25s var(--ease)}
+#composerSend:hover{background:color-mix(in srgb,var(--accent) 30%,transparent);color:var(--text)}
+#composerSend:disabled{opacity:.4;cursor:default}
+body[data-vision="true"] .composer{opacity:0;pointer-events:none}
+@media (max-height:620px){.composer{bottom:10px}}
+
 .enroll-link{position:fixed;z-index:9;right:clamp(16px,2.5vw,28px);bottom:clamp(16px,2.5vh,26px);
  padding:9px 15px;border-radius:var(--r-full);color:var(--text-3);font-size:13px;font-weight:500;
  text-decoration:none;background:var(--glass);border:1px solid var(--glass-border);
@@ -212,6 +235,11 @@ body[data-board="offline"] #board{color:var(--danger);border-color:color-mix(in 
   </div>
   <div class="vision-foot"><span id="visionTitle">Looking</span><span id="visionSummary"></span></div>
  </section>
+ <form class="composer" id="composer" autocomplete="off">
+  <input id="composerInput" type="text" placeholder="Too loud? Type to me instead…"
+         aria-label="Type a message instead of speaking" maxlength="500">
+  <button id="composerSend" type="submit" title="Send" aria-label="Send">&#8593;</button>
+ </form>
  <a class="enroll-link" id="enrollLink" target="_blank" rel="noopener">Manage people</a>
  <canvas id="vcanvas" style="display:none"></canvas>
 <script>
@@ -592,6 +620,57 @@ setInterval(()=>{
    fetch(API+'/api/vision/frame',{method:'POST',body:fd}).catch(()=>{}).finally(()=>{frameBusy=false})},'image/jpeg',0.7)},500);
 }
 
+// ---------------- typed turns ----------------
+// Goes through /api/voice/text, so it is the same turn the microphone produces:
+// same tools, same history, same spoken reply. Only the way in differs.
+const composer=document.getElementById('composer'),
+      composerInput=document.getElementById('composerInput'),
+      composerSend=document.getElementById('composerSend');
+let typing=false;
+composer.addEventListener('submit',async e=>{
+  e.preventDefault();e.stopPropagation();
+  const text=composerInput.value.trim();
+  if(!text||typing)return;
+  // Typing wins over whatever the microphone was doing: stop listening, drop any
+  // half-captured utterance, and abandon a reply in progress rather than letting
+  // two turns overlap.
+  if(streamAbort){streamAbort.abort();streamAbort=null}
+  streamDone=true;stopAllAudio();
+  pcmChunks=[];pcmPreroll=[];hasSpeech=false;
+  typing=true;composerInput.value='';composerSend.disabled=true;
+  convState='thinking';face('thinking');turnUsedCamera=false;
+  say('<b>You:</b> '+esc(text)+'\\n<b>Me:</b> …');
+  // Audio needs a user gesture to start; submitting the form IS one, so a page
+  // that was never "started" can still be used entirely by typing.
+  try{if(!audioCtx){audioCtx=new (window.AudioContext||window.webkitAudioContext)()}
+      if(audioCtx.state==='suspended')await audioCtx.resume()}catch(e){}
+  let r,j;
+  try{r=await fetch(API+'/api/voice/text',{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({text})})}
+  catch(err){typing=false;composerSend.disabled=false;
+    fatal('Lost the connection to the server. Is it still running?');return}
+  try{j=await r.json()}
+  catch(err){typing=false;composerSend.disabled=false;
+    fatal('Server error '+r.status+'. Check the terminal running the agent.');return}
+  typing=false;composerSend.disabled=false;
+  if(r.status===503){fatal((j.error||'Server not configured.').split('\\n')[0]);return}
+  if(r.status===409){say('<b>You:</b> '+esc(text)+'\\n'+esc(j.error||'Busy, try again.'),true);
+    convState='idle';face('');return}
+  if(j.error){say('<b>You:</b> '+esc(text)+'\\n'+esc(j.error),true);convState='idle';face('');return}
+  if(usedCamera(j.tools)){turnUsedCamera=true;showVision('analysis')}
+  say('<b>You:</b> '+esc(text)+'\\n<b>Me:</b> '+esc(j.reply||'(no reply)'));
+  // Speak it, exactly as a spoken turn would.
+  try{
+    const tr=await fetch(API+'/api/voice/tts',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({text:j.reply||''})});
+    if(tr.ok){const tj=await tr.json();if(tj.audio_b64){await play(tj.audio_b64);return}}
+  }catch(e){}
+  if(!turnUsedCamera)hideVision();
+  convState='idle';face('');if(handsFree&&started)beginListen();
+});
+// Keystrokes in the box must never reach the click-to-pause handlers behind it.
+composer.addEventListener('click',e=>e.stopPropagation());
+
 function togglePause(){handsFree=!handsFree;if(handsFree){beginListen()}else{if(streamAbort){streamAbort.abort();streamAbort=null}streamDone=true;stopAllAudio();hideVision();pcmChunks=[];pcmPreroll=[];convState='idle';face('');say('Paused. Click the face to resume.')}}
 faceEl.addEventListener('click',e=>{e.stopPropagation();if(!started)startAll();else togglePause()});
 document.body.addEventListener('click',()=>{if(!started)startAll()});
@@ -829,6 +908,27 @@ def create_app(agent, vision_service):
             return jsonify({"error": str(e)}), 503
         except Exception as e:
             return jsonify({"error": f"turn failed: {e}"}), 500
+
+    @app.post("/api/voice/tts")
+    def voice_tts():
+        """Speak a piece of text that has already been decided.
+
+        Used by the typed-input path: the reply came back from /api/voice/text,
+        and the page still wants to HEAR it. Deliberately not part of a turn --
+        it takes no turn lock and touches no history, so typing while the agent
+        is mid-thought cannot deadlock against it.
+        """
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"error": "expected a JSON object with a 'text' field"}), 400
+        text = str(data.get("text", "")).strip()
+        if not text:
+            return jsonify({"audio_b64": ""})
+        try:
+            wav = agent.tts.synth(text[:1000])
+        except Exception as e:
+            return jsonify({"error": f"synthesis failed: {e}"}), 500
+        return jsonify({"audio_b64": base64.b64encode(wav).decode() if wav else ""})
 
     @app.get("/api/vision/scene")
     def scene():
