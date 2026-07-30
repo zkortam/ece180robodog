@@ -375,3 +375,23 @@ def test_a_live_feed_is_still_given_the_full_timeout(vs):
     finally:
         stop.set(); t.join(2)
     assert result["status"] == "timeout"      # ran the clock, not a false fast-fail
+
+
+def test_an_oversized_camera_frame_is_downscaled(vs):
+    """cap.set(FRAME_WIDTH) is only a REQUEST. This camera was asked for 320x240
+    and delivered 640x360 -- 2.25x the pixels for the detector on every frame,
+    which starved the speech recognition the person is waiting on."""
+    big = np.zeros((360, 640, 3), dtype=np.uint8)
+    out = vs._downscale(big)
+    assert out.shape[1] == vs.width and out.shape[0] == vs.height
+
+
+def test_a_correctly_sized_frame_is_passed_through_untouched(vs):
+    exact = np.zeros((vs.height, vs.width, 3), dtype=np.uint8)
+    assert vs._downscale(exact) is exact
+
+
+def test_a_smaller_frame_is_not_upscaled(vs):
+    """Upscaling would invent detail and cost time for nothing."""
+    small = np.zeros((120, 160, 3), dtype=np.uint8)
+    assert vs._downscale(small).shape[:2] == (120, 160)

@@ -384,6 +384,26 @@ class VisionService(fe.EnrollmentStore):
                 if generation == self._generation:
                     self.running = False
 
+    def _downscale(self, frame):
+        """Enforce the configured capture size in software.
+
+        cap.set(FRAME_WIDTH/HEIGHT) is a REQUEST, and plenty of UVC cameras simply
+        ignore it -- this one was asked for 320x240 and delivered 640x360, which is
+        2.25x the pixels for the detector to scan on every single frame. On four
+        small cores that is not free: it was starving the speech recognition the
+        person is actually waiting on, pushing STT from ~0.8s to ~2.7s.
+
+        Resizing here costs a fraction of a millisecond and makes the perception
+        cost independent of whatever the camera decided to hand us.
+        """
+        height, width = frame.shape[:2]
+        if width <= self.width and height <= self.height:
+            return frame
+        import cv2
+        # INTER_AREA is the right filter for shrinking: it averages, so faces stay
+        # detectable instead of aliasing the way nearest-neighbour would.
+        return cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
+
     def _run_camera(self, generation):
         cap = self._open_camera()
         if cap is None:
@@ -408,7 +428,7 @@ class VisionService(fe.EnrollmentStore):
                     if t0 - healthy_since >= self.DEAD_FEED_SECONDS:
                         reopens = 0
                     try:
-                        self.step(frame)
+                        self.step(self._downscale(frame))
                     except Exception as e:            # one bad frame must never kill perception
                         print(f"[vision] frame error: {e}", file=sys.stderr)
                 elif t0 - last_good >= self.DEAD_FEED_SECONDS:

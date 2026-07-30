@@ -253,7 +253,7 @@ const faceEl=document.getElementById('face'),smile=document.getElementById('smil
 let started=false,handsFree=true,looking=false,baseFace='';
 let micStream=null,audioCtx=null,analyser=null,dataArr=null,lastT=0;
 let calibrated=false,calibVals=[],noiseFloor=0.01;
-let convState='idle',pcmNode=null,silentGain=null,pcmChunks=[],pcmPreroll=[],segStart=0,curSrc=null;
+let convState='idle',pcmNode=null,silentGain=null,pcmChunks=[],pcmPreroll=[],segStart=0,recordStart=0,curSrc=null;
 let streamSources=new Set(),streamDone=false,playbackEnd=0,streamAbort=null;
 let voicedMs=0,silenceMs=0,speechMs=0,hasSpeech=false,pending=null,peakE=0;
 let visionOpen=false,visionKind='',visionBusy=false,turnUsedCamera=false;
@@ -411,7 +411,7 @@ function beginListen(){
 const CAMERA_TOOLS=new Set(['who_is_in_view','describe_scene','get_person_emotion','enroll_face','train_emotion','start_watching']);
 function usedCamera(trace){return Array.isArray(trace)&&trace.some(t=>CAMERA_TOOLS.has(t&&t.tool))}
 function endpoint(){if(convState!=='recording')return;
- if(peakE<Math.max(NEAR_FIELD_MIN,noiseFloor*NEAR_FIELD_MULT)){beginListen();return}
+ if(speechMs<MIN_SPEECH_MS||peakE<Math.max(NEAR_FIELD_MIN,noiseFloor*NEAR_FIELD_MULT)){beginListen();return}
  turnUsedCamera=false;convState='thinking';face('thinking');say('Thinking…');sendUtterance()}
 function restartSeg(){beginListen()}
 
@@ -427,12 +427,19 @@ function vadLoop(){
  if(convState==='listening'||convState==='recording'){
    if(e>peakE)peakE=e;
    if(e>onset){voicedMs+=dt;silenceMs=0;
-     if(!hasSpeech&&voicedMs>=110){hasSpeech=true;convState='recording';face('recording');say('Hearing you…')}
+     if(!hasSpeech&&voicedMs>=110){hasSpeech=true;recordStart=now;convState='recording';face('recording');say('Hearing you…')}
      if(hasSpeech)speechMs+=dt;
    }else{voicedMs=Math.max(0,voicedMs-dt);
-     if(hasSpeech){silenceMs+=dt;if(silenceMs>=ENDPOINT_MS&&speechMs>=MIN_SPEECH_MS)endpoint()}}
+     if(hasSpeech){
+       // `keep` is the release threshold. The old code calculated it and then
+       // ignored it, treating every dip below onset as silence; quiet syllables
+       // could therefore end a turn while the person was still speaking.
+       if(e<keep)silenceMs+=dt;else silenceMs=Math.max(0,silenceMs-dt*.25);
+       if(silenceMs>=ENDPOINT_MS)endpoint()
+     }}
    if(!hasSpeech&&now-segStart>LISTEN_RESET_MS)restartSeg();
-   if(hasSpeech&&now-segStart>MAX_UTTER_MS)endpoint();
+   // Bound the recording itself, not time spent waiting before speech began.
+   if(hasSpeech&&now-recordStart>MAX_UTTER_MS)endpoint();
  }else if(convState==='speaking'&&handsFree){
    // Speaker bleed rises and falls with the reply, so the bar to interrupt rises
    // with it. Decay faster than it accumulates so echo can never creep to the hold.

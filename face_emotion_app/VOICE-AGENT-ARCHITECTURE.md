@@ -11,9 +11,10 @@
 
 A voice-first assistant that you talk to and that talks back — no screen, no keyboard, no chat box —
 which can also *look at you*: it knows who is in front of the camera, what each person feels right now,
-and how that has drifted over the last couple of minutes. The board captures speech, transcribes it
-locally, sends the text to Cerebras' `gpt-oss-120b` with a set of **vision tools** wired to the existing
-YuNet/SFace/MobileFaceNet pipeline, streams the reply back through a local neural TTS, and speaks it —
+and how that has drifted over the last couple of minutes. The board captures a complete utterance,
+transcribes it locally, sends the text to Cerebras' `gpt-oss-120b` with a set of **vision tools** wired
+to the existing YuNet/SFace/MobileFaceNet pipeline, synthesizes the completed reply locally in sentence
+chunks, and speaks it —
 all as a **turn-taking (half-duplex)** loop that runs entirely on four Cortex-A53 cores while an
 always-on vision thread keeps perception fresh. The existing **registration pipeline (face enroll +
 personal-emotion training) is untouched and stays separate**; face detection/recognition/emotion are
@@ -32,14 +33,14 @@ Pi-5 (A76) that most "runs real-time on a Pi" benchmarks assume. So we (a) keep 
 
 | Core | LISTEN (user talking) | THINK (waiting on Cerebras) | SPEAK (agent talking) |
 |---|---|---|---|
-| **0** | Orchestrator (asyncio) + Silero VAD | Orchestrator + VAD | Orchestrator + VAD (**barge-in watch**) |
+| **0** | Orchestrator thread + adaptive VAD | Orchestrator | Orchestrator |
 | **1** | Moonshine STT | idle (network-bound) | Piper TTS |
 | **2** | Moonshine STT | idle (network-bound) | Piper TTS |
 | **3** | **Vision loop (always-on)** | **Vision loop** | **Vision loop** |
 
 **Why this fits:** STT (LISTEN) and TTS (SPEAK) are *temporally disjoint* under half-duplex, so cores 1–2
 are time-shared between them and never contended at once. Vision owns core 3 permanently and never
-competes with STT/TTS. VAD (~1–2 MB, sub-ms per 32 ms frame) and the asyncio orchestrator are light
+competes with STT/TTS. VAD (NumPy RMS over 20 ms frames) and the orchestrator thread are light
 enough to share core 0. **That temporal disjointness is the entire reason 4 cores is enough.**
 
 ### 2.2 RAM — comfortable, not the bottleneck
@@ -49,7 +50,7 @@ enough to share core 0. **That temporal disjointness is the entire reason 4 core
 | Debian 12 + Python 3 baseline | ~0.7 GB |
 | OpenCV + vision (YuNet+SFace+MobileFaceNet via `cv2.dnn`) + frame buffers | ~0.5 GB |
 | Moonshine v2 tiny STT (onnxruntime + 26 M model) | ~0.25 GB |
-| Silero VAD (shares onnxruntime) | ~0.02 GB |
+| Adaptive RMS VAD (NumPy) | negligible |
 | Piper TTS subprocess (low/x-low voice) | ~0.1 GB |
 | Orchestrator + Flask/WebSocket + Cerebras HTTPS client | ~0.15 GB |
 | **Peak total** | **~1.7 GB of 4 GB** (~2 GB headroom) |
@@ -61,9 +62,11 @@ enough to share core 0. **That temporal disjointness is the entire reason 4 core
 - **Full-duplex (listen while speaking): NOT feasible.** It requires continuous STT + streaming TTS +
   vision + acoustic echo cancellation *simultaneously* on 4 A53 cores. STT alone saturates 1–2 cores;
   add TTS+vision+AEC and every stage drops below real-time. **Rejected.**
-- **Half-duplex + VAD-only barge-in: RECOMMENDED.** Listen → think → speak, but keep only the cheap
-  Silero VAD alive during SPEAK so the user can interrupt; a confirmed barge-in kills TTS and returns to
-  LISTEN. This buys ~90% of the full-duplex feel for ~0% of the extra CPU.
+- **Half-duplex: IMPLEMENTED for standalone board audio.** Listen → think → speak → listen. Capture is
+  closed during STT/LLM/TTS so the speaker cannot feed its own answer back into the microphone.
+- **Browser barge-in: IMPLEMENTED.** The browser keeps Web Audio VAD alive during playback and can stop
+  browser playback. Standalone board barge-in is not implemented because its microphone is
+  intentionally closed while the board speaks and there is no acoustic echo canceller.
 - **Push-to-talk: the safe demo path / degraded mode.** A button (browser or board GPIO) defines the
   listen window; release = end-of-turn. It removes the silence-endpoint wait *and* the echo problem
   (mic is closed while speaking), so it always works even on the board-native audio path. **Ship PTT
@@ -82,20 +85,20 @@ thermal mitigation; vision on one core + bursty STT is the steady state, not a 4
               CLIENT (browser: laptop/phone — primary)          BOARD  (4× A53, CPU-only)                       CLOUD
    ┌──────────────────────────────────────────────┐  ┌────────────────────────────────────────────────┐  ┌──────────────┐
    │ getUserMedia(audio)                           │  │                                                │  │  Cerebras    │
-   │  ├─ WebRTC AEC3 echo-cancel ┐                 │  │  ┌──────── ORCHESTRATOR (asyncio, core 0) ────┐ │  │  Inference   │
-   │  ├─ noise suppression        │ 16 kHz PCM     │WS│  │  state machine:                            │ │  │  gpt-oss-120b│
+   │  ├─ WebRTC AEC3 echo-cancel ┐                 │  │  ┌──────── ORCHESTRATOR (thread, core 0) ─────┐ │  │  Inference   │
+   │  ├─ noise suppression        │ 16 kHz PCM     │HTTP  turn loop:                                │ │  │  gpt-oss-120b│
    │  └─ auto-gain               ▼  (mono)         ├─►│  │  IDLE→LISTEN→ENDPOINT→THINK→SPEAK           │ │  │  (OpenAI-    │
    │ MediaRecorder / WS ──────────────────────────►│  │  └──┬─────────┬──────────┬───────────┬───────┘ │  │  compatible, │
    │                                               │  │     │ audio   │ text     │ tokens    │ tool    │  │  tool calls) │
    │ <audio> playback ◄────────────────────────────┤◄─┤     ▼         ▼          ▼           ▼ calls   │  └──────┬───────┘
-   │  (TTS PCM streamed back)                      │WS│  ┌───────┐ ┌────────┐ ┌───────┐ ┌──────────┐    │         │
-   │                                               │  │  │Silero │ │Moonshine│ │ Piper │ │  TOOLS   │   │ HTTPS   │
-   │ getUserMedia(video) ─── 320×240 JPEG ────────►│  │  │ VAD   │ │  tiny   │ │  TTS  │ │(tools.py)│   │◄─stream─┘
+   │  (TTS WAV chunks returned as NDJSON)           │HTTP ┌───────┐ ┌────────┐ ┌───────┐ ┌──────────┐    │         │
+   │                                               │  │  │adaptive││Moonshine│ │ Piper │ │  TOOLS   │   │ HTTPS   │
+   │ getUserMedia(video) ─── 320×240 JPEG ────────►│  │  │ VAD   │ │  tiny   │ │  TTS  │ │(tools.py)│   │◄─reply──┘
    │  (2–5 fps, downscaled) [OPTIONAL]             │  │  │core0  │ │core1-2  │ │core1-2│ └────┬─────┘   │  SSE tokens
    └──────────────────────────────────────────────┘  │  │thread │ │thread   │ │subproc│      │ read    │  + tool_calls
                                                       │  └───┬───┘ └────┬────┘ └───▲───┘      ▼ (locked) │
-   ── OR board-native audio (fallback) ──             │      │barge-in  │ final    │ sentence ┌──────────┐│
-   USB headset ─ ALSA card ─ sounddevice ───────────► │      │stop      ▼ text     │ chunks   │VisionState│
+   ── OR board-native audio (fallback) ──             │      │endpoint  │ final    │ sentence ┌──────────┐│
+   USB headset ─ ALSA card ─ arecord/aplay ─────────► │      │          ▼ text     │ chunks   │VisionState│
    (mic in + speaker out, one USB-Audio device)       │      └──────────────────────┴─────────┤ (locked) ││
                                                       │                                        │ ring buf ││
                                                       │  ┌─────────────────────────────────────┤ events   ││
@@ -110,16 +113,16 @@ thermal mitigation; vision on one core + bursty STT is the steady state, not a 4
 **One full turn (half-duplex):**
 
 1. **Capture** — mic audio (browser AEC, or board USB mic) → 16 kHz mono PCM → orchestrator.
-2. **VAD gate (core 0)** — Silero VAD on 512-sample / 32 ms frames; speech onset → phase = `LISTEN`.
-3. **STT (cores 1–2)** — Moonshine v2 tiny streams **partial** transcripts (<200 ms) as you speak.
-4. **Endpoint** — ~500–700 ms of contiguous silence (or PTT release) → phase = `ENDPOINTING` → final transcript.
+2. **VAD gate (core 0)** — adaptive energy detection on 320-sample / 20 ms frames uses a measured room
+   floor, onset confirmation, hysteresis, a peak-quality check, and a hard wall-clock recording bound.
+3. **STT (cores 1–2)** — after endpointing, resident Moonshine v2 tiny transcribes the completed WAV.
+4. **Endpoint** — 360 ms below a room-relative release threshold closes the utterance.
 5. **THINK** — orchestrator appends transcript to `ConvState.history`, calls Cerebras `gpt-oss-120b`
-   with `stream=True` + the tool schemas. If the model emits `tool_calls`, `tools.py` answers each from
+   with the tool schemas. If the model emits `tool_calls`, `tools.py` answers each from
    `VisionState` under the lock (microseconds), appends `role:"tool"` messages, and calls Cerebras again.
-6. **SPEAK (cores 1–2)** — streamed reply tokens are split on sentence/clause boundaries; each finished
-   chunk is handed to Piper immediately → PCM → back to the speaker. **First sentence plays while the LLM
-   is still generating the rest.** Silero VAD stays alive on core 0 for barge-in.
-7. Barge-in or end-of-utterance → phase = `IDLE`/`LISTEN`.
+6. **SPEAK (cores 1–2)** — the completed reply is split on sentence/clause boundaries. Each chunk is
+   synthesized and fed to one continuous playback stream; capture stays closed to prevent feedback.
+7. Playback drains, capture reopens, a short settling window is measured, and `LISTEN` resumes.
 
 **Always-on vision loop (core 3), independent of the turn:** grabs frames at 2–5 fps, runs YuNet over
 **every** face, SFace-embeds + identifies each, runs the emotion ONNX every Nth frame per track, and
@@ -146,20 +149,20 @@ snapshot of this state; they never drive the camera.
   client = OpenAI(base_url="https://api.cerebras.ai/v1",
                   api_key=os.environ["CEREBRAS_API_KEY"])   # keys are prefixed csk-...
   ```
-- **Streaming + tools:** `stream=True`; accumulate `delta.tool_calls[i].function.arguments` fragments
-  by `.index`, finalize on `finish_reason == "tool_calls"`, `json.loads` the arguments string, run the
-  tool, append `{"role":"tool","tool_call_id":..., "content": json.dumps(result)}`, call again.
+- **Tools:** the current client requests one complete chat completion per tool round, dispatches any
+  returned calls, appends `{"role":"tool","tool_call_id":..., "content": json.dumps(result)}`, and calls
+  again. Token streaming is not currently implemented.
 - **Gotcha:** on `gpt-oss-120b` you may **not** send `tools` and `response_format` together — use tools
   only (we do). Set `parallel_tool_calls=True` so one round-trip can batch e.g. `who_is_in_view` +
   `get_person_emotion`.
-- **Latency:** TTFT ~170–240 ms; generation is effectively instant at 3,000 tok/s, so the LLM leg is
-  **RTT-dominated, not the bottleneck** — use streaming so TTS starts on the first tokens.
+- **Latency:** generation is fast enough that the LLM leg is normally RTT-dominated. TTS begins after
+  the completed reply arrives.
 
-### 4.2 STT — **Moonshine v2 tiny (streaming)** on the board; faster-whisper on the Mac
+### 4.2 STT — **Moonshine v2 tiny (utterance API)** on the board; faster-whisper on the Mac
 
-- **Board pick:** **Moonshine v2 tiny, streaming variant** (26 M params, ~34 MB, **MIT**, runs on
-  **onnxruntime**). It is **streaming-first by design** — sliding-window attention, no 30 s Whisper
-  window, sub-200 ms partials — which is exactly what near-real-time turn-taking needs. Realistic RTF on
+- **Board pick:** **Moonshine v2 tiny** (26 M params, ~34 MB, **MIT**, runs on
+  **onnxruntime**). The current `moonshine_onnx.transcribe()` integration runs after endpointing on the
+  completed utterance; this application does not expose partial transcripts. Realistic RTF on
   1–2 shared A53 cores ≈ **0.2–0.4** (well under real-time), and tiny leaves CPU for vision + TTS.
 - **Board fallback:** **Vosk-small (`vosk-model-small-en-us`, Apache-2.0)** — ~50 MB / ~300 MB RAM,
   genuine word-by-word streaming, battle-tested on Pi-3/4-class ARM. Lower accuracy on hard audio but
@@ -190,12 +193,13 @@ snapshot of this state; they never drive the camera.
 - **Mac dev:** **Kokoro (kokoro-onnx, 82 M, Apache-2.0)** for best-per-MB quality prototyping/comparison
   (same ONNX stack), understanding it won't hit interactive latency on the board.
 
-### 4.4 VAD — **Silero VAD tiny** (MIT, ONNX)
+### 4.4 VAD — adaptive energy endpointing
 
-512-sample / 32 ms chunks at 16 kHz; ~1–2 MB, sub-ms per frame. Gates the recognizer so STT only runs on
-speech (saves CPU for vision+TTS), drives the ~500–700 ms silence endpoint, and stays alive during SPEAK
-for barge-in (require ~150–200 ms of voiced frames to reject a cough/echo blip). **Fallback:** `webrtcvad`
-(BSD, lighter, less accurate) only if the absolute-minimum footprint is needed.
+The standalone path reads 320-sample / 20 ms chunks at 16 kHz. It calibrates after every capture
+re-open, carries a blended room floor across turns, confirms onset across a short window, uses separate
+room-relative onset/release thresholds, rejects weak boundary triggers, trims endpoint silence, and
+caps recording by wall time. It is dependency-free. The browser uses its own Web Audio energy detector
+plus WebRTC echo cancellation; browser playback supports barge-in.
 
 ### 4.5 Audio transport + physical attach — **browser front-end primary, board-native USB fallback**
 
@@ -295,14 +299,10 @@ VisionState = {
 # absence > PRESENCE_GAP (1.5 s); fire "leave" when now - last_seen > LEAVE_TIMEOUT (2.0 s).
 # unknowns keyed "unknown#<track_id>".
 
-# ===== ConvState — guarded by conv_lock; the turn / barge-in state machine =====
-ConvState = {
-  "phase": str,                     # IDLE|LISTEN|ENDPOINTING|THINKING|SPEAKING
-  "partial_transcript": str, "final_transcript": str,
-  "speaking_utterance_id": int,     # ++ each TTS turn; barge-in bumps it to drop late chunks
-  "barge_in": threading.Event,
-  "history": [ {role, content} ]    # rolling chat, trimmed to a token budget
-}
+# ===== Actual conversation state =====
+# VoiceAgent owns one RLock and a rolling user/assistant history. BoardAudioLoop
+# owns the capture/VAD state for one utterance. The browser owns its UI phase
+# (listening|recording|thinking|speaking) and browser-only barge-in state.
 ```
 
 The **ring buffer is the substrate for temporal queries**: `emotion_timeline` scans `ring[name]` over the
@@ -312,7 +312,22 @@ rate) = a few hundred KB — two-plus minutes of timestamped history, well withi
 
 ---
 
-## 7. Concurrency + core-affinity model
+## 7. Historical design proposal (not the current implementation)
+
+Sections 7–11 below are retained as the original proposal for comparison. They describe planned modules
+(`vad_silero.py`, `audio_ws.py`, streaming STT/LLM, explicit `ConvState`, and core affinity) that do not
+exist in the running application. The authoritative implemented flow is §3–§4 above and the source
+files `voice_agent/board_audio.py`, `voice_agent/web.py`, `voice_agent/stt.py`,
+`voice_agent/cerebras_client.py`, and `voice_agent/orchestrator.py`. In particular:
+
+- standalone capture/VAD is a synchronous `BoardAudioLoop` thread using `arecord`;
+- STT and LLM calls consume complete utterances/replies rather than partial token streams;
+- only browser playback supports barge-in; standalone playback closes capture to prevent echo;
+- `VoiceAgent.turn_lock` serializes all board/browser/text turns;
+- systemd requests the performance governor and bounds ONNX thread counts, but does not pin components
+  to individual cores.
+
+### 7.1 Original concurrency + core-affinity proposal
 
 - **One asyncio orchestrator** (single thread, I/O-bound: WebSocket, Cerebras HTTPS, subprocess pipes)
   coordinates everything; heavy lifting is in native code that **runs off the GIL**.
