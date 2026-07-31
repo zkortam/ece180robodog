@@ -56,11 +56,12 @@ class StatusLED:
         """Display *state* synchronously, returning False only if unavailable."""
         if state not in COLORS:
             raise ValueError(f"unknown LED state {state!r}")
-        if not self._available:
-            return False
         with self._lock:
             if state == self._state:
                 return True
+            # The UNO Q matrix is a separate Bridge device.  Some board images
+            # do not expose the Linux RGB sysfs LED at all; that must not prevent
+            # the large matrix from receiving state updates.
             if not self._write(state):
                 return False
             self._state = state
@@ -73,17 +74,20 @@ class StatusLED:
 
     def _write(self, state):
         rgb_ok = True
-        try:
-            for path, value in zip(self._paths, COLORS[state]):
-                path.write_text(str(value))
-        except OSError as exc:
-            if not self._warned:
-                print(f"[status-led] unavailable: {exc}", flush=True)
-                self._warned = True
-            self._available = False
+        if self._available:
+            try:
+                for path, value in zip(self._paths, COLORS[state]):
+                    path.write_text(str(value))
+            except OSError as exc:
+                if not self._warned:
+                    print(f"[status-led] unavailable: {exc}", flush=True)
+                    self._warned = True
+                self._available = False
+                rgb_ok = False
+        else:
             rgb_ok = False
-        self._write_matrix(state)
-        return rgb_ok
+        matrix_ok = self._write_matrix(state)
+        return rgb_ok or matrix_ok
 
     def _write_matrix(self, state):
         if not self._matrix_command:
@@ -114,5 +118,12 @@ class StatusLED:
 
 # The board's own management stack can rewrite the LED after boot or an ADB
 # reconnect. Reasserting once every two seconds keeps the indicator truthful.
-status_led = StatusLED(refresh_interval=2,
-                       matrix_command=shutil.which("arduino-router-cli"))
+def _matrix_cli():
+    """Find the Bridge CLI even when systemd gives the service a minimal PATH."""
+    configured = __import__("os").environ.get("ARDUINO_ROUTER_CLI", "").strip()
+    candidates = [configured, shutil.which("arduino-router-cli"),
+                  "/usr/bin/arduino-router-cli", "/usr/local/bin/arduino-router-cli"]
+    return next((p for p in candidates if p and Path(p).is_file()), None)
+
+
+status_led = StatusLED(refresh_interval=2, matrix_command=_matrix_cli())

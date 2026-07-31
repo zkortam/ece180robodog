@@ -33,6 +33,16 @@ def test_missing_board_led_is_a_safe_noop(tmp_path):
     assert not led.set("listening")
 
 
+def test_matrix_works_when_linux_rgb_led_is_absent(tmp_path):
+    """UNO Q images may omit sysfs RGB channels; the large matrix still works."""
+    completed = mock.Mock(returncode=0)
+    led = StatusLED(tmp_path, matrix_command="/usr/bin/arduino-router-cli")
+    with mock.patch("voice_agent.status_led.subprocess.run", return_value=completed) as run:
+        assert led.set("listening")
+    run.assert_called_once()
+    assert led.state == "listening"
+
+
 def test_duplicate_state_does_not_rewrite_sysfs(tmp_path):
     led = make_led(tmp_path)
     assert led.set("listening")

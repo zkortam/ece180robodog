@@ -6,7 +6,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOARD_HOST="${FACE_BOARD_HOST:-zk-unoq-01.local}"
 BOARD_USER="${FACE_BOARD_USER:-arduino}"
-BOARD_APP_DIR="${FACE_BOARD_APP_DIR:-/home/arduino/app}"
+BOARD_APP_DIR="${FACE_BOARD_APP_DIR:-/home/arduino/Documents/ece180/face_emotion_app}"
 INTERVAL="${FACE_SYNC_INTERVAL:-2}"
 TARGET="${BOARD_USER}@${BOARD_HOST}"
 
