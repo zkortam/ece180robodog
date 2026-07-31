@@ -23,3 +23,18 @@ needs_models = pytest.mark.skipif(
     not (DETECTOR.exists() and RECOGNIZER.exists()),
     reason="face models not present; run scripts/download_models.sh",
 )
+
+
+class _TestStatus:
+    """Keep unit tests from touching real board LEDs or the RouterBridge."""
+
+    def set(self, state):
+        return True
+
+
+@pytest.fixture(autouse=True)
+def isolate_board_status(monkeypatch):
+    # On the UNO Q, audio tests mock subprocess.Popen while the real status
+    # indicator uses subprocess.run in a background thread. Without isolation the
+    # two mocks cross-talk only on physical hardware, making the suite non-hermetic.
+    monkeypatch.setattr("voice_agent.board_audio.status_led", _TestStatus())
