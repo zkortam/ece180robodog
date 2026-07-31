@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import threading
 import time
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -28,7 +30,8 @@ COLORS = {
 class StatusLED:
     """Best-effort RGB state output; absent LEDs never affect the voice service."""
 
-    def __init__(self, root="/sys/class/leds", refresh_interval=0):
+    def __init__(self, root="/sys/class/leds", refresh_interval=0,
+                 matrix_command=None):
         root = Path(root)
         self._paths = tuple(root / f"{channel}:user" / "brightness"
                             for channel in ("red", "green", "blue"))
@@ -38,6 +41,8 @@ class StatusLED:
         self._warned = False
         self._refresh_interval = max(0.0, float(refresh_interval))
         self._refresh_thread = None
+        self._matrix_command = matrix_command
+        self._matrix_warned = False
 
     @property
     def available(self):
@@ -67,6 +72,7 @@ class StatusLED:
             return True
 
     def _write(self, state):
+        rgb_ok = True
         try:
             for path, value in zip(self._paths, COLORS[state]):
                 path.write_text(str(value))
@@ -75,8 +81,27 @@ class StatusLED:
                 print(f"[status-led] unavailable: {exc}", flush=True)
                 self._warned = True
             self._available = False
+            rgb_ok = False
+        self._write_matrix(state)
+        return rgb_ok
+
+    def _write_matrix(self, state):
+        if not self._matrix_command:
             return False
-        return True
+        try:
+            result = subprocess.run(
+                [self._matrix_command, "set_robodog_status", state],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=1, check=False)
+        except (OSError, subprocess.SubprocessError):
+            result = None
+        ok = bool(result and result.returncode == 0)
+        if not ok and not self._matrix_warned:
+            print("[status-led] matrix bridge not ready; retrying", flush=True)
+            self._matrix_warned = True
+        elif ok:
+            self._matrix_warned = False
+        return ok
 
     def _refresh(self):
         """Reassert state because board services may also touch the user LED."""
@@ -89,4 +114,5 @@ class StatusLED:
 
 # The board's own management stack can rewrite the LED after boot or an ADB
 # reconnect. Reasserting once every two seconds keeps the indicator truthful.
-status_led = StatusLED(refresh_interval=2)
+status_led = StatusLED(refresh_interval=2,
+                       matrix_command=shutil.which("arduino-router-cli"))

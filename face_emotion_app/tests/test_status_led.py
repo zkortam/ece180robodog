@@ -73,6 +73,28 @@ def test_unknown_state_is_rejected_even_without_hardware(tmp_path):
         led.set("confused")
 
 
+def test_state_is_sent_to_matrix_bridge(tmp_path):
+    led = make_led(tmp_path)
+    led._matrix_command = "/usr/bin/arduino-router-cli"
+    completed = mock.Mock(returncode=0)
+    with mock.patch("voice_agent.status_led.subprocess.run",
+                    return_value=completed) as run:
+        assert led.set("hearing")
+
+    run.assert_called_once_with(
+        ["/usr/bin/arduino-router-cli", "set_robodog_status", "hearing"],
+        stdout=-3, stderr=-3, timeout=1, check=False)
+
+
+def test_matrix_bridge_failure_never_breaks_rgb_status(tmp_path):
+    led = make_led(tmp_path)
+    led._matrix_command = "/missing/router"
+    with mock.patch("voice_agent.status_led.subprocess.run",
+                    side_effect=OSError("missing")):
+        assert led.set("error")
+    assert led.state == "error"
+
+
 class StateProbe:
     def __init__(self):
         self.states = []
