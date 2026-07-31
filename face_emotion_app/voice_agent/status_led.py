@@ -7,6 +7,7 @@ need no MCU sketch, and cannot steal time from capture or playback.
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 
@@ -27,7 +28,7 @@ COLORS = {
 class StatusLED:
     """Best-effort RGB state output; absent LEDs never affect the voice service."""
 
-    def __init__(self, root="/sys/class/leds"):
+    def __init__(self, root="/sys/class/leds", refresh_interval=0):
         root = Path(root)
         self._paths = tuple(root / f"{channel}:user" / "brightness"
                             for channel in ("red", "green", "blue"))
@@ -35,6 +36,8 @@ class StatusLED:
         self._state = None
         self._lock = threading.Lock()
         self._warned = False
+        self._refresh_interval = max(0.0, float(refresh_interval))
+        self._refresh_thread = None
 
     @property
     def available(self):
@@ -53,18 +56,37 @@ class StatusLED:
         with self._lock:
             if state == self._state:
                 return True
-            try:
-                for path, value in zip(self._paths, COLORS[state]):
-                    path.write_text(str(value))
-            except OSError as exc:
-                if not self._warned:
-                    print(f"[status-led] unavailable: {exc}", flush=True)
-                    self._warned = True
-                self._available = False
+            if not self._write(state):
                 return False
             self._state = state
             print(f"[status-led] {state}", flush=True)
+            if self._refresh_interval and self._refresh_thread is None:
+                self._refresh_thread = threading.Thread(
+                    target=self._refresh, name="uno-status-led", daemon=True)
+                self._refresh_thread.start()
             return True
 
+    def _write(self, state):
+        try:
+            for path, value in zip(self._paths, COLORS[state]):
+                path.write_text(str(value))
+        except OSError as exc:
+            if not self._warned:
+                print(f"[status-led] unavailable: {exc}", flush=True)
+                self._warned = True
+            self._available = False
+            return False
+        return True
 
-status_led = StatusLED()
+    def _refresh(self):
+        """Reassert state because board services may also touch the user LED."""
+        while self._available:
+            time.sleep(self._refresh_interval)
+            with self._lock:
+                if self._state is not None and not self._write(self._state):
+                    return
+
+
+# The board's own management stack can rewrite the LED after boot or an ADB
+# reconnect. Reasserting once every two seconds keeps the indicator truthful.
+status_led = StatusLED(refresh_interval=2)

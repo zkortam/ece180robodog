@@ -42,6 +42,24 @@ def test_duplicate_state_does_not_rewrite_sysfs(tmp_path):
         assert led.set("listening")
 
 
+def test_refresh_reasserts_state_after_an_external_overwrite(tmp_path):
+    led = make_led(tmp_path)
+    led._refresh_interval = 0.01
+    assert led.set("waiting")
+    red = tmp_path / "red:user" / "brightness"
+    green = tmp_path / "green:user" / "brightness"
+    red.write_text("1")
+    green.write_text("0")
+
+    for _ in range(30):
+        if red.read_text() == "1" and green.read_text() == "1":
+            break
+        import time
+        time.sleep(0.01)
+
+    assert (red.read_text(), green.read_text()) == ("1", "1")
+
+
 def test_write_failure_disables_led_without_breaking_caller(tmp_path):
     led = make_led(tmp_path)
     with mock.patch("pathlib.Path.write_text", side_effect=OSError("denied")):
