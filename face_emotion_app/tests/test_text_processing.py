@@ -1,6 +1,7 @@
 """Speech chunking and noise rejection: the two pure text paths on every turn."""
 import pytest
 
+from voice_agent import config
 from voice_agent.stt import is_noise_transcript
 from voice_agent.tts import _split_lead, sentence_chunks
 
@@ -104,3 +105,10 @@ def test_unsplittable_opener_is_left_alone():
     """No comma, no conjunction: better one long chunk than a break mid-phrase."""
     opener = "Supercalifragilisticexpialidociousness notwithstanding whatsoever indeed"
     assert _split_lead(opener, limit=30) == [opener]
+
+
+# ------------------------------------------------------- conversational policy
+
+def test_default_prompt_is_conversational_not_forced_to_one_sentence():
+    assert "two to four spoken sentences" in config.SYSTEM_PROMPT
+    assert "ONE short sentence for a normal answer" not in config.SYSTEM_PROMPT
