@@ -86,11 +86,11 @@ def _amplify(pcm_bytes, target_rms=None, knee=None):
     return (samples * 32767.0).astype("<i2").tobytes()
 
 
-# Fraction of the mixer's range to set the speaker to. 50% by default: this USB
+# Fraction of the mixer's range to set the speaker to. 75% by default: this USB
 # speaker's ALSA volume resets to its factory default whenever the device
 # re-enumerates or the driver reloads, so the level must be asserted every time.
 # Full scale was uncomfortably loud in the physical enclosure.
-PLAYBACK_VOLUME = os.environ.get("VOICE_PLAYBACK_VOLUME", "50%")
+PLAYBACK_VOLUME = os.environ.get("VOICE_PLAYBACK_VOLUME", "75%")
 
 
 def set_playback_volume(device, level=None):

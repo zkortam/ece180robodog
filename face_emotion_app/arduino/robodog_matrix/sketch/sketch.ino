@@ -155,7 +155,7 @@ void draw_state() {
   matrix.draw(frame);
 }
 
-void set_robodog_status(String value) {
+bool set_robodog_status(String value) {
   RobotState requested = STATE_ERROR;
   if (value == "off") requested = STATE_OFF;
   else if (value == "starting") requested = STATE_STARTING;
@@ -173,6 +173,7 @@ void set_robodog_status(String value) {
     next_frame_at = 0;
   }
   k_mutex_unlock(&display_mutex);
+  return true;
 }
 
 void setup() {
