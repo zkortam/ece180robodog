@@ -18,10 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vision_service import VisionService, capture_device_indexes   # noqa: E402
 from voice_agent import config                    # noqa: E402
 from voice_agent.orchestrator import VoiceAgent    # noqa: E402
+from voice_agent.status_led import status_led      # noqa: E402
 from voice_agent.web import create_app             # noqa: E402
 
 
 def main():
+    status_led.set("starting")
     # Line-buffer our own diagnostics. Python block-buffers stdout whenever it is
     # not a terminal, which is exactly how this runs in production: under systemd,
     # under nohup, piped to a log. Startup progress and per-turn timings then sit

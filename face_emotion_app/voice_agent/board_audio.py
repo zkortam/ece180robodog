@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from . import config
+from .status_led import status_led
 from .tts import sentence_chunks
 
 
@@ -265,8 +266,9 @@ class BoardAudioLoop:
     MIN_NOISE_FLOOR = 0.002
     MIN_ONSET = float(os.environ.get("VOICE_MIN_ONSET", "0.012"))
 
-    def __init__(self, agent):
+    def __init__(self, agent, led=None):
         self.agent = agent
+        self.led = led or status_led
         self._stop = threading.Event()
         self._thread = None
         self.capture_device = None
@@ -328,12 +330,14 @@ class BoardAudioLoop:
         announced_fault = False
         while not self._stop.is_set():
             if not self._discover():
+                self.led.set("waiting")
                 if not waiting:
                     print("[board-audio] waiting for USB microphone and speaker")
                     waiting, ready_for = True, None
                 self._stop.wait(2)
                 continue
             waiting = False
+            self.led.set("listening")
             # Announce the devices the first time and after any change, so the log
             # always shows what the board is actually listening and speaking on.
             devices = (self.capture_device, self.playback_device)
@@ -364,6 +368,7 @@ class BoardAudioLoop:
             # nothing in the log to say why. Such a fault fails identically every
             # turn, so report it and back off instead of burning a turn per second.
             except SystemExit as exc:
+                self.led.set("error")
                 print(f"[board-audio] cannot answer: {exc}\n"
                       f"[board-audio] retrying in {self.CONFIG_FAULT_BACKOFF:.0f}s "
                       "-- fix the configuration and it resumes on its own")
@@ -376,8 +381,10 @@ class BoardAudioLoop:
                     self._speak("I can't reach my language service right now. "
                                 "Check my configuration.")
                     announced_fault = True
+                self.led.set("error")
                 self._stop.wait(self.CONFIG_FAULT_BACKOFF)
             except Exception as exc:
+                self.led.set("error")
                 # A capture device that fails REPEATEDLY is a hardware fault, not a
                 # blip: a hub that keeps browning out, a port that is dying, a mic
                 # that was pulled. Left alone this loop spins forever printing the
@@ -398,6 +405,7 @@ class BoardAudioLoop:
                     self._warned_capture_broken = True
                     self._speak("Something is wrong with my microphone. "
                                 "Check that it's plugged in.")
+                    self.led.set("error")
                 # Back off progressively so a persistent fault costs almost nothing,
                 # while a one-off blip still recovers in a second.
                 self._stop.wait(1.0 if self._repeated_errors < 5 else 5.0)
@@ -449,6 +457,7 @@ class BoardAudioLoop:
                         "Check that it's plugged in.")
 
     def _listen_once(self):
+        self.led.set("listening")
         proc = subprocess.Popen(
             ["arecord", "-D", self.capture_device, "-q", "-f", "S16_LE", "-r", str(self.RATE),
              "-c", "1", "-t", "raw"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -555,6 +564,7 @@ class BoardAudioLoop:
                     if (len(onset_votes) == onset_votes.maxlen
                             and sum(onset_votes) >= self.ONSET_REQUIRED_CHUNKS):
                         speaking, frames = True, list(preroll)
+                        self.led.set("hearing")
                         trigger_threshold = calibration_trigger or threshold
                         # Only peaks belonging to this onset may validate the turn.
                         # Keeping the largest level seen during hours of idle listening
@@ -632,8 +642,9 @@ class BoardAudioLoop:
                   f"(floor={self.noise_floor:.4f} threshold={threshold:.4f} "
                   f"release={release:.4f} peak={peak_rms:.4f} "
                   f"range={dynamic_range:.4f} "
-                  f"end={endpoint_reason or 'stopped'})", flush=True)
+                      f"end={endpoint_reason or 'stopped'})", flush=True)
             try:
+                self.led.set("thinking")
                 self._answer(b"".join(frames))
             except SystemExit:
                 raise
@@ -651,7 +662,8 @@ class BoardAudioLoop:
             print(f"[board-audio] discarded {speech_s:.1f}s/{elapsed_s:.1f}s: {reason} "
                   f"(floor={self.noise_floor:.4f} threshold={threshold:.4f} "
                   f"peak={peak_rms:.4f}, range={dynamic_range:.4f}, "
-                  f"need={quality_peak:.4f})", flush=True)
+                      f"need={quality_peak:.4f})", flush=True)
+            self.led.set("listening")
 
     # Level to normalize the captured utterance to before handing it to STT.
     # 0.10 RMS is a healthy speech recording; this mic delivers about 0.013.
@@ -789,6 +801,7 @@ class BoardAudioLoop:
                     proc = self._open_playback(fmt)
                     if proc is None:
                         return False, None
+                    self.led.set("speaking")
                     stream_format = fmt
                     first_chunk_ms = (time.perf_counter() - started) * 1000
                 elif fmt != stream_format:
@@ -799,6 +812,7 @@ class BoardAudioLoop:
                     proc = self._open_playback(fmt)
                     if proc is None:
                         return spoke, first_chunk_ms
+                    self.led.set("speaking")
                     stream_format = fmt
                 next_wav = (pool.submit(self.agent.tts.synth, next_text)
                             if next_text else None)
@@ -814,6 +828,7 @@ class BoardAudioLoop:
             pool.shutdown(wait=True, cancel_futures=True)
             if proc is not None:
                 self._close_playback(proc)
+            self.led.set("listening")
 
     def _open_playback(self, fmt):
         """Start an aplay reading raw PCM from stdin, or None if it will not run."""
@@ -869,10 +884,12 @@ class BoardAudioLoop:
             proc = self._open_playback(fmt)
             if proc is None:
                 return
+            self.led.set("speaking")
             try:
                 proc.stdin.write(_amplify(pcm) if fmt[2] == 2 else pcm)
             finally:
                 self._close_playback(proc)
+                self.led.set("listening")
         except (OSError, subprocess.SubprocessError, wave.Error, EOFError) as exc:
             print(f"[board-audio] playback failed: {type(exc).__name__}: {exc}")
 
